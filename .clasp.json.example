@@ -1,0 +1,4 @@
+{
+  "scriptId": "<your Apps Script project id>",
+  "rootDir": "<absolute path to this repo on your machine>"
+}

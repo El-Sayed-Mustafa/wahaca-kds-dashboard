@@ -1,0 +1,16 @@
+# clasp local state — contains a machine-specific rootDir
+.clasp.json
+
+# clasp credentials (never commit — they authorise pushes to the live script)
+.clasprc.json
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+node_modules/
+
+# images are committed intentionally for the README
+!docs/*.png
