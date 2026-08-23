@@ -134,7 +134,11 @@ var DEFAULT_SETTINGS = [
   ['Range_Tolerance_Minutes', 8], ['Order_Group_Gap_Minutes', 1],
   ['Bar_Tolerance_Minutes', 5], ['Mains_Tolerance_Minutes', 15], ['Passmaster_Tolerance_Minutes', 2],
   ['Salad_Tolerance_Minutes', 15], ['Street_Tolerance_Minutes', 15],
-  ['Green_Threshold', 0.10], ['Yellow_Threshold', 0.20], ['Red_Threshold', 0.30]
+  ['Green_Threshold', 0.10], ['Yellow_Threshold', 0.20], ['Red_Threshold', 0.30],
+  // Tables to drop before any aggregation. The staff table is left open all day, so its tickets
+  // carry huge fired-to-fulfilled gaps that wreck Passmaster range and prep times.
+  // Comma-separated; each entry matches a table name that STARTS with it ("Staff", "Staff 2").
+  ['Excluded_Tables', 'staff']
 ];
 
 var REQUIRED_COLUMNS = [
@@ -452,8 +456,28 @@ function getSettings_() {
     rangeToleranceMinutes:  num('Range_Tolerance_Minutes', 8),
     orderGroupGapMinutes:   num('Order_Group_Gap_Minutes', 1),
     toleranceByScreen: { Bar: num('Bar_Tolerance_Minutes', 5), Mains: num('Mains_Tolerance_Minutes', 15), Passmaster: num('Passmaster_Tolerance_Minutes', 2), Salad: num('Salad_Tolerance_Minutes', 15), Street: num('Street_Tolerance_Minutes', 15) },
-    greenThreshold: num('Green_Threshold', 0.10), yellowThreshold: num('Yellow_Threshold', 0.20), redThreshold: num('Red_Threshold', 0.30)
+    greenThreshold: num('Green_Threshold', 0.10), yellowThreshold: num('Yellow_Threshold', 0.20), redThreshold: num('Red_Threshold', 0.30),
+    excludedTables: parseExcludedTables_(map['Excluded_Tables'])
   };
+}
+
+// 'staff, bar tab' -> ['staff','bar tab']. Falls back to the default when the Settings row is
+// missing, so workbooks seeded before this setting existed still filter the staff table.
+function parseExcludedTables_(v) {
+  var s = (v === undefined || v === null || String(v).trim() === '') ? 'staff' : String(v);
+  return s.split(',').map(function (x) { return x.trim().toLowerCase(); }).filter(function (x) { return x; });
+}
+// Matches a table whose name starts with an excluded entry, on a word boundary:
+// 'Staff', 'STAFF 2', 'staff-table' all match; 'Staffordshire' does not.
+function isExcludedTable_(tableRaw, list) {
+  var t = String(tableRaw == null ? '' : tableRaw).trim().toLowerCase();
+  if (!t || !list || !list.length) return false;
+  for (var i = 0; i < list.length; i++) {
+    var e = list[i];
+    if (t === e) return true;
+    if (t.length > e.length && t.slice(0, e.length) === e && /[^a-z0-9]/.test(t.charAt(e.length))) return true;
+  }
+  return false;
 }
 
 function buildPeriodMap_() {
@@ -582,7 +606,7 @@ function _refreshNewFilesCore() {
       appendRows_(SHEETS.DAY_INDEX, res.dayClaimRows);
       dupDays += res.duplicateDaysSkipped || 0;
       upsertProcessedFile_(ss, { fileId: fileId, fileName: fileName, fileSize: fileSize, lastUpdated: lastUpd, processedAt: new Date(), status: 'Success', rowsProcessed: res.rowsProcessed, errorMessage: '' });
-      done++; log_('INFO', 'Processed "' + fileName + '" (' + res.rowsProcessed + ' rows' + (res.duplicateDaysSkipped ? ', ' + res.duplicateDaysSkipped + ' overlap cell(s) skipped' : '') + ').');
+      done++; log_('INFO', 'Processed "' + fileName + '" (' + res.rowsProcessed + ' rows' + (res.duplicateDaysSkipped ? ', ' + res.duplicateDaysSkipped + ' overlap cell(s) skipped' : '') + (res.excludedTableRows ? ', ' + res.excludedTableRows + ' excluded-table row(s) dropped' : '') + ').');
     } catch (e) {
       failed++;
       upsertProcessedFile_(ss, { fileId: fileId, fileName: fileName, fileSize: fileSize, lastUpdated: lastUpd, processedAt: new Date(), status: 'Failed', rowsProcessed: 0, errorMessage: e.message });
@@ -650,7 +674,7 @@ function processCsvFile_(file, settings, periodMap, stationMap, dayIndex, fileId
   var cLoc = getCol_(idx, 'Location'), cCheck = getCol_(idx, 'Check #'), cTable = getCol_(idx, 'Table'),
       cStation = getCol_(idx, 'Station'), cFired = getCol_(idx, 'Fired Date'), cFulf = getCol_(idx, 'Fulfilled Date');
 
-  var cleaned = [], unmapped = {}, rowsProcessed = 0;
+  var cleaned = [], unmapped = {}, rowsProcessed = 0, excludedTableRows = 0;
   var dayClaimRows = [], claimed = {}, dupDays = {};
   for (var r = 1; r < data.length; r++) {
     var row = data[r];
@@ -658,6 +682,9 @@ function processCsvFile_(file, settings, periodMap, stationMap, dayIndex, fileId
     var location = (row[cLoc] || '').toString().trim();
     if (!location) continue;
     if (location.toLowerCase() === 'wahaca [office]') continue;
+    // Staff table (and anything else listed in Excluded_Tables) is dropped before any aggregation:
+    // it stays open all day, so its fired-to-fulfilled gaps distort range, prep time and red tickets.
+    if (isExcludedTable_(row[cTable], settings.excludedTables)) { excludedTableRows++; continue; }
     var stationRaw = (row[cStation] || '').toString().trim();
     if (stationRaw.toLowerCase() === 'no print') continue;
     if (stationRaw && /^[-\u2013\u2014\s]+$/.test(stationRaw)) continue;
@@ -697,7 +724,7 @@ function processCsvFile_(file, settings, periodMap, stationMap, dayIndex, fileId
   var rangeOut = buildRangeOutputs_(cleaned, settings, fileId, fileName);
   var unmappedRows = Object.keys(unmapped).map(function (k) { var u = unmapped[k]; return [fileId, fileName, u.location, u.station, u.count]; });
 
-  return { redSummaryRows: redSummaryRows, timesSummaryRows: timesSummaryRows, rangeSummaryRows: rangeOut.summaryRows, rangeDetailRows: rangeOut.detailRows, unmappedRows: unmappedRows, dayClaimRows: dayClaimRows, duplicateDaysSkipped: Object.keys(dupDays).length, rowsProcessed: rowsProcessed };
+  return { redSummaryRows: redSummaryRows, timesSummaryRows: timesSummaryRows, rangeSummaryRows: rangeOut.summaryRows, rangeDetailRows: rangeOut.detailRows, unmappedRows: unmappedRows, dayClaimRows: dayClaimRows, duplicateDaysSkipped: Object.keys(dupDays).length, rowsProcessed: rowsProcessed, excludedTableRows: excludedTableRows };
 }
 
 function buildRedSummary_(rows, settings, fileId, fileName) {

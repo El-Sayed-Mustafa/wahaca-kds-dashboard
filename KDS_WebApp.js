@@ -487,11 +487,14 @@ function buildHourlySummary() {
     var data = Utilities.parseCsv(text); if (!data || data.length < 2) continue;
     var idx = buildHeaderIndex_(data[0]);
     var cLoc = getCol_(idx, 'Location'), cStation = getCol_(idx, 'Station'), cFired = getCol_(idx, 'Fired Date'), cFulf = getCol_(idx, 'Fulfilled Date');
+    var cTable = getCol_(idx, 'Table');
     if (cLoc < 0 || cStation < 0 || cFired < 0 || cFulf < 0) continue;
     for (var r = 1; r < data.length; r++) {
       var row = data[r]; if (!row || !row.length) continue;
       var location = (row[cLoc] || '').toString().trim(); if (!location) continue;
       if (location.toLowerCase() === 'wahaca [office]') continue;
+      // Same Excluded_Tables filter as processCsvFile_ — the staff table sits open all day.
+      if (cTable >= 0 && isExcludedTable_(row[cTable], settings.excludedTables)) continue;
       var stationRaw = (row[cStation] || '').toString().trim();
       if (stationRaw.toLowerCase() === 'no print') continue;
       if (stationRaw && /^[-\u2013\u2014\s]+$/.test(stationRaw)) continue;
