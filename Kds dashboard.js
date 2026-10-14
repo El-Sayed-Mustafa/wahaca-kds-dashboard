@@ -28,6 +28,10 @@ var DASH_GREEN_BG  = '#B7E1CD';
 var DASH_YELLOW_BG = '#FCE8B2';
 var DASH_RED_BG    = '#F4C7C3';
 var DASH_HEADER_BG = '#E8EAED';
+// Separator rules between blocks of rows. Period total is the darkest (outermost), site total a
+// step lighter, so the hierarchy still reads top-down while both act as hard dividers.
+var DASH_TOTAL_BG      = '#5F6368';  // period / grand total
+var DASH_SITE_TOTAL_BG = '#9AA0A6';  // site total — the line between one site and the next
 var DASH_HEADER_FG = '#202124';   // dark header font so the day/shift labels are readable
 var DASH_TITLE_FG  = '#1a73e8';
 
@@ -261,8 +265,11 @@ function dbApplyBandsFormula_(dash, def) {
   // Total-row separators FIRST (first match wins) — conditional formatting re-evaluates on every
   // slicer/collapse, so these bands follow the filters instead of drifting like static borders.
   // Top-level (period) total: "…Total" sits in column A. Deeper subtotals: column A blank, "Total" further right.
-  rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=ISNUMBER(SEARCH("Total",$A' + dataStart + '))').setBackground('#dadce0').setBold(true).setRanges([area]).build());
-  if (rowsLen >= 2) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND($A' + dataStart + '="",ISNUMBER(SEARCH("Total",$B' + dataStart + ')))').setBackground('#eef0f2').setBold(true).setRanges([area]).build());
+  // The site-total row is the only thing separating one site's screens from the next, and a pivot
+  // can't hold a real blank row — so it's drawn as a solid dark rule instead of a faint tint.
+  // Teams were reading a site's rows and the next site's rows as one block.
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=ISNUMBER(SEARCH("Total",$A' + dataStart + '))').setBackground(DASH_TOTAL_BG).setFontColor('#ffffff').setBold(true).setRanges([area]).build());
+  if (rowsLen >= 2) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND($A' + dataStart + '="",ISNUMBER(SEARCH("Total",$B' + dataStart + ')))').setBackground(DASH_SITE_TOTAL_BG).setFontColor('#ffffff').setBold(true).setRanges([area]).build());
   // Value colour bands.
   rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND(ISNUMBER(' + a + '),' + a + '<=$B$2)').setBackground(DASH_GREEN_BG).setRanges([area]).build());
   rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND(ISNUMBER(' + a + '),' + a + '>=$B$4)').setBackground(DASH_RED_BG).setRanges([area]).build());

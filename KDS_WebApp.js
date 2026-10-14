@@ -26,8 +26,8 @@ var CONFIG = {
   LB_BANDS: { red: { green: 0.10, amber: 0.15 }, pass: { green: 0.15, amber: 0.20 } },
   CACHE_TTL: 1800, // seconds cached period bundles live (30 min); Refresh forces a rebuild
   CACHE_VER: 'v15', // bump this whenever the bundle shape changes — invalidates all cached bundles
-  WEIGHTS_WITH_DELIVEROO:    { del: 0.10, food: 0.50, red: 0.20, pass: 0.20 },
-  WEIGHTS_WITHOUT_DELIVEROO: { del: 0.00, food: 0.50, red: 0.25, pass: 0.25 }
+  // Leaderboard weights live in LB_WEIGHTS in Index.html (50% food / 25% red / 25% Passmaster).
+  // They were duplicated here and never read, so the copy has been removed rather than left to rot.
 };
 
 function doGet() {
@@ -262,8 +262,8 @@ function readScores_() {
 }
 
 // Build/refresh the weekly matrix: Site | FY | On Deliveroo | [P1W1 Food/Del ...] — preserves existing values
-function seedScoresTab() {
-  var existing = readScores_(), fys = fysFromTimes_();
+function seedScoresTab(extraFy) {
+  var existing = readScores_(), fys = fysFromTimes_(extraFy);
   var byKey = {}, onByKey = {};
   existing.forEach(function (r) {
     var fk = (r.fy && r.fy !== '*') ? r.fy : String(fys[0]); // migrate legacy (no-FY) into earliest FY
@@ -324,11 +324,22 @@ function applyScoresFormatting_(sh, pws, nRows, nCols) {
     ]);
   }
 }
-function fysFromTimes_() { var T = readSheet_(CONFIG.TIMES.id, CONFIG.TIMES.sheet), s = {}; T.forEach(function (r) { var fy = fyOf_(pick_(r, C.date)); if (fy != null) s[fy] = 1; }); var a = Object.keys(s).map(Number).sort(function (x, y) { return x - y; }); return a.length ? a : [26]; }
+// Fiscal years the score tabs should carry rows for: every FY present in the data, PLUS the FY we
+// are currently in. Without today's FY the tabs stay a year behind — on the first day of a new FY
+// there is no data yet, so no rows would be created and scores would have nowhere to go.
+// Pass extraFy (e.g. 28) to pre-create next year's rows before it starts.
+function fysFromTimes_(extraFy) {
+  var T = readSheet_(CONFIG.TIMES.id, CONFIG.TIMES.sheet), s = {};
+  T.forEach(function (r) { var fy = fyOf_(pick_(r, C.date)); if (fy != null) s[fy] = 1; });
+  var today = fyOf_(new Date()); if (today != null) s[today] = 1;
+  if (extraFy != null && !isNaN(+extraFy)) s[+extraFy] = 1;
+  var a = Object.keys(s).map(Number).sort(function (x, y) { return x - y; });
+  return a.length ? a : [26];
+}
 // Run ONCE to (re)build the period score tabs as: Site | FY | P1..P13 (one row per site per fiscal year).
-function seedPeriodTabs() {
+function seedPeriodTabs(extraFy) {
   var ss = SpreadsheetApp.openById(CONFIG.MANUAL.id);
-  var sites = sitesFromTimes_(), fys = fysFromTimes_();
+  var sites = sitesFromTimes_(), fys = fysFromTimes_(extraFy);
   var periods = []; for (var p = 1; p <= 13; p++) periods.push('P' + p);
   ['Leaderboard_Period_Food', 'Leaderboard_Period_Deliveroo'].forEach(function (name) {
     var existing = readPeriodMatrix_(name); // { ns -> { fyKey('26'|'*') -> { Px: v } } }
@@ -455,9 +466,12 @@ function saveManualScores(list, fullKey) {
     if (food != null && (isNaN(food) || food < 1 || food > 10)) { errors.push(site + ': Food 1-10'); return; }
     var rowNum = rowOf[site + '|' + fyNum];
     if (!rowNum) { rowNum = sh.getLastRow() + 1; sh.getRange(rowNum, 1).setValue(site); sh.getRange(rowNum, 2).setValue(fyLabel); rowOf[site + '|' + fyNum] = rowNum; }
-    sh.getRange(rowNum, 3).setValue(item.onDeliveroo ? 'Yes' : 'No');
-    sh.getRange(rowNum, foodCol + 1).setValue(food == null ? '' : +food.toFixed(1));
-    sh.getRange(rowNum, delCol + 1).setValue(del == null ? '' : +del.toFixed(2));
+    // Write ONLY the fields the caller actually sent. The dashboard no longer edits Deliveroo, so
+    // writing it unconditionally here would blank every stored Deliveroo score on the first save.
+    var has = function (k) { return Object.prototype.hasOwnProperty.call(item, k); };
+    if (has('onDeliveroo')) sh.getRange(rowNum, 3).setValue(item.onDeliveroo ? 'Yes' : 'No');
+    if (has('food')) sh.getRange(rowNum, foodCol + 1).setValue(food == null ? '' : +food.toFixed(1));
+    if (has('deliveroo') && delCol >= 0) sh.getRange(rowNum, delCol + 1).setValue(del == null ? '' : +del.toFixed(2));
   });
   bumpLbVersion_();
   return { ok: errors.length === 0, errors: errors };

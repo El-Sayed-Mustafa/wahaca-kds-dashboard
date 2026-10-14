@@ -132,9 +132,9 @@
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
   .segb{border:none;background:#fff;color:var(--muted);font-size:11.5px;font-weight:600;padding:5px 10px;cursor:pointer}
   .segb.active{background:var(--blue);color:#fff}
-  .medal{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;font-size:12px;font-weight:800;color:#fff}
+  .medal{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:50%;font-size:16px;font-weight:800;color:#fff;box-shadow:0 1px 3px rgba(60,64,67,.28)}
   .medal.g{background:linear-gradient(135deg,#f5c518,#e0a800)} .medal.s{background:linear-gradient(135deg,#c7ccd1,#9aa0a6)} .medal.b{background:linear-gradient(135deg,#cd8b52,#b06a34)}
-  .rankn{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;font-weight:700;color:var(--muted)}
+  .rankn{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;font-size:14px;font-weight:700;color:var(--muted)}
   .lbrow-win{background:linear-gradient(90deg,#fff8e1,#fff)}
   .mcell{display:inline-block;padding:2px 8px;border-radius:7px;font-weight:600;font-size:12px}
   .mcell.good{background:var(--green-bg);color:var(--green)} .mcell.warn{background:var(--amber-bg);color:var(--amber)} .mcell.bad{background:var(--red-bg);color:var(--red)} .mcell.na{background:#f1f3f4;color:var(--muted)}
@@ -210,7 +210,7 @@
         <div id="lbEditNote" class="note"></div>
         <div style="margin-top:14px"><button class="btn" id="lbSaveBtn" onclick="saveScores()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-9"/></svg> Save scores</button> <span id="lbSaved" class="note"></span></div>
         <div id="lbPending" class="note"></div>
-        <details class="lbhelp"><summary>How scoring works</summary><p class="note" style="margin-top:8px">Scores live in the <b>Leaderboard_Scores</b> tab (one row per site per week) — fill it in for history, or edit a single week here and Save. Food <b>≥7</b> is green, below is red; Deliveroo <b>≥4.65</b> is green, below is red. Red ticket and Passmaster come from KDS for the selection and are coloured against their <b>tolerances</b>, not against the other sites — Red ticket: under 10% green, 10–15% amber, 15%+ red. Passmaster: under 15% green, 15–20% amber, 20%+ red. Each column is ranked, ranks are weighted and summed — <b>lowest total wins</b>. Food carries the most weight, so poor food can't be offset by fast timings.</p></details>
+        <details class="lbhelp"><summary>How scoring works</summary><p class="note" style="margin-top:8px">Scores live in the <b>Leaderboard_Scores</b> tab (one row per site per week) — fill it in for history, or edit a single week here and Save. Food <b>≥7</b> is green, below is red. Red ticket and Passmaster come from KDS for the selection and are coloured against their <b>tolerances</b>, not against the other sites — Red ticket: under 10% green, 10–15% amber, 15%+ red. Passmaster: under 15% green, 15–20% amber, 20%+ red. Each column is ranked, ranks are weighted and summed — <b>lowest total wins</b>. Weights are <b>50% Food, 25% Red ticket, 25% Passmaster</b>, so poor food can't be offset by fast timings.</p></details>
       </div>
     </section>
 
@@ -372,22 +372,32 @@ function agg(cur,fLoc,fScrSet,fDate){
     var D=tD[d]||(tD[d]={o:0,w:0,t:0});D.o+=tk;if(du!=null){D.w+=du*tk;D.t+=tk;}
   });
   var prep=dwT?dwS/dwT:null;
-  var ro=0,rt=0,redL={},rD={};
+  // Rates are bucketed by period so a quarter can be averaged across its periods (see rateFromBuckets).
+  // Outside a quarter there is a single '_' bucket, which pools exactly as before.
+  var Q=isQuarterSel();
+  var ro=0,rt=0,redL={},rD={},redP={};
   cur.r.forEach(function(r){var l=r[0],s=r[1],d=r[2],o=r[3],t=r[4];
     if(fLoc>=0&&l!==fLoc)return;if(!okScr(s))return;if(fDate&&d!==fDate)return;
-    ro+=o;rt+=t;var L=redL[l]||(redL[l]={o:0,t:0});L.o+=o;L.t+=t;var D=rD[d]||(rD[d]={o:0,t:0});D.o+=o;D.t+=t;
+    ro+=o;rt+=t;var pk=Q?periodOfPwLbl(d):'_';
+    var L=redL[l]||(redL[l]={}),lb=L[pk]||(L[pk]={o:0,t:0});lb.o+=o;lb.t+=t;
+    var P=redP[pk]||(redP[pk]={o:0,t:0});P.o+=o;P.t+=t;
+    var D=rD[d]||(rD[d]={o:0,t:0});D.o+=o;D.t+=t;
   });
-  var delayedPct=rt?ro/rt:null;
-  var go=0,gt=0,gD={},rngL={};
-  cur.g.forEach(function(r){var l=r[0],d=r[1],o=r[2],t=r[3];if(fLoc>=0&&l!==fLoc)return;if(fDate&&d!==fDate)return;go+=o;gt+=t;var D=gD[d]||(gD[d]={o:0,t:0});D.o+=o;D.t+=t;var GL=rngL[l]||(rngL[l]={o:0,t:0});GL.o+=o;GL.t+=t;});
-  var rangePct=gt?go/gt:null;
+  var delayedPct=rateFromBuckets(redP,Q);
+  var go=0,gt=0,gD={},rngL={},rngP={};
+  cur.g.forEach(function(r){var l=r[0],d=r[1],o=r[2],t=r[3];if(fLoc>=0&&l!==fLoc)return;if(fDate&&d!==fDate)return;
+    go+=o;gt+=t;var pk=Q?periodOfPwLbl(d):'_';
+    var GL=rngL[l]||(rngL[l]={}),gb=GL[pk]||(GL[pk]={o:0,t:0});gb.o+=o;gb.t+=t;
+    var P=rngP[pk]||(rngP[pk]={o:0,t:0});P.o+=o;P.t+=t;
+    var D=gD[d]||(gD[d]={o:0,t:0});D.o+=o;D.t+=t;});
+  var rangePct=rateFromBuckets(rngP,Q);
   var dates=Object.keys(tD).sort();
   var tl=[],to=[],tp=[],ton=[],tdel=[],trg=[];
   dates.forEach(function(d){var D=tD[d];tl.push(fmtDate(d));to.push(D.o);tp.push(D.t?+(D.w/D.t).toFixed(1):null);
     var r2=rD[d];ton.push(r2&&r2.t?+((1-r2.o/r2.t)*100).toFixed(1):null);tdel.push(r2&&r2.t?Math.round((r2.o/r2.t)*D.o):null);
     var g2=gD[d];trg.push(g2&&g2.t?+((g2.o/g2.t)*100).toFixed(1):null);});
   var st=Object.keys(byScr).map(function(k){return{k:+k,v:byScr[k]};}).sort(function(a,b){return b.v-a.v;}).slice(0,5);
-  var tbl=Object.keys(byLoc).map(function(k){var L=byLoc[k],rr=redL[k],gg=rngL[k];var dp=rr&&rr.t?rr.o/rr.t:null;var rgp=gg&&gg.t?gg.o/gg.t:null;return{site:LOCNAME(+k),orders:L.o,prep:L.t?+(L.w/L.t).toFixed(1):null,delay:dp,range:rgp,status:statusOf(dp)};}).sort(function(a,b){return b.orders-a.orders;});
+  var tbl=Object.keys(byLoc).map(function(k){var L=byLoc[k];var dp=rateFromBuckets(redL[k],Q),rgp=rateFromBuckets(rngL[k],Q);return{site:LOCNAME(+k),orders:L.o,prep:L.t?+(L.w/L.t).toFixed(1):null,delay:dp,range:rgp,status:statusOf(dp)};}).sort(function(a,b){return b.orders-a.orders;});
   return{orders:orders,prep:prep==null?null:+prep.toFixed(1),onTime:delayedPct==null?null:1-delayedPct,delayedPct:delayedPct,
     delayedCount:delayedPct==null?null:Math.round(delayedPct*orders),rangePct:rangePct,screens:Object.keys(byScr).length,
     trend:{labels:tl,orders:to,prep:tp,onTime:ton,delayed:tdel,range:trg},
@@ -582,6 +592,23 @@ function loadLeaderboard(force){
   document.getElementById('wowTable').innerHTML='<div class="note"><span class="spin"></span> loading…</div>';
   API.withSuccessHandler(function(list){MANUAL=list;MANUAL_KEY=key;lbRenderAll();}).withFailureHandler(function(e){toast('Load failed');}).getManualScores(key);
 }
+// Leaderboard weighting. Deliveroo was dropped, so the three remaining columns carry it all.
+var LB_WEIGHTS={food:.50,red:.25,pass:.25};
+
+// A quarter's Red ticket / Passmaster figure is the MEAN OF ITS PERIOD RATES, not the combined
+// total of the whole quarter. Sites were already sent their period numbers, so the quarter has to
+// reconcile with those; pooling the raw totals instead would silently re-weight the quarter toward
+// whichever period was busiest. Everything else (a week, a period, a year) still pools normally.
+function isQuarterSel(){return String(val('fPeriod')).indexOf('quarter:')===0;}
+function periodOfPwLbl(pw){var m=/^(P\d+)/i.exec(String(pw));return m?m[1].toUpperCase():String(pw);}
+function rateFromBuckets(byPeriod,quarter){
+  if(!byPeriod)return null;
+  var ks=Object.keys(byPeriod);if(!ks.length)return null;
+  if(quarter){var s=0,n=0;ks.forEach(function(p){var b=byPeriod[p];if(b.t){s+=b.o/b.t;n++;}});return n?s/n:null;}
+  var o=0,t=0;ks.forEach(function(p){o+=byPeriod[p].o;t+=byPeriod[p].t;});
+  return t?o/t:null;
+}
+
 function lbDayFilter(){return (document.getElementById('fDay')||{}).value||null;}
 // The equivalent weekday in the previous period, so a day-filtered comparison stays like-for-like.
 // Returns a never-matching sentinel if the previous period has no such day (deltas then read "—").
@@ -602,18 +629,22 @@ function lbBuild(data,scoreList,dateFilter){
   if(SCREEN_SEL!==null){lbScrSet=new Set();SCREEN_SEL.forEach(function(n){var idx=BUNDLE.screens.indexOf(n);if(idx>=0)lbScrSet.add(idx);});}
   var lbDate=dateFilter||null;
   function okS(s){return !lbScrSet||lbScrSet.has(s);}
-  (data.r||[]).forEach(function(r){var l=r[0],s=r[1],d=r[2];if(!okS(s))return;if(lbDate&&d!==lbDate)return;var x=red[l]||(red[l]={o:0,t:0});x.o+=r[3];x.t+=r[4];});
-  (data.g||[]).forEach(function(r){var l=r[0],d=r[1];if(lbDate&&d!==lbDate)return;var x=rng[l]||(rng[l]={o:0,t:0});x.o+=r[2];x.t+=r[3];});
-  function rp(name){var i=BUNDLE.locations.indexOf(name);var x=red[i];return x&&x.t?x.o/x.t:null;}
-  function gp(name){var i=BUNDLE.locations.indexOf(name);var x=rng[i];return x&&x.t?x.o/x.t:null;}
+  var Q=isQuarterSel();
+  (data.r||[]).forEach(function(r){var l=r[0],s=r[1],d=r[2];if(!okS(s))return;if(lbDate&&d!==lbDate)return;
+    var L=red[l]||(red[l]={}),b=L[Q?periodOfPwLbl(d):'_']||(L[Q?periodOfPwLbl(d):'_']={o:0,t:0});b.o+=r[3];b.t+=r[4];});
+  (data.g||[]).forEach(function(r){var l=r[0],d=r[1];if(lbDate&&d!==lbDate)return;
+    var L=rng[l]||(rng[l]={}),b=L[Q?periodOfPwLbl(d):'_']||(L[Q?periodOfPwLbl(d):'_']={o:0,t:0});b.o+=r[2];b.t+=r[3];});
+  function rp(name){return rateFromBuckets(red[BUNDLE.locations.indexOf(name)],Q);}
+  function gp(name){return rateFromBuckets(rng[BUNDLE.locations.indexOf(name)],Q);}
   var all=scoreList.map(function(m){return {site:m.site,onDeliveroo:m.onDeliveroo,deliveroo:m.deliveroo,food:m.food,redPct:rp(m.site),passPct:gp(m.site)};});
-  var inc=all.filter(function(r){if(r.food==null)return false;if(r.onDeliveroo&&r.deliveroo==null)return false;return true;});
+  // Deliveroo is no longer part of the standing, so Food is the only score a site must have to rank.
+  var inc=all.filter(function(r){return r.food!=null;});
   var pending=all.filter(function(r){return inc.indexOf(r)===-1;}).map(function(r){return r.site;});
   function rankCol(items,fn,hib){var arr=items.map(function(it){return{id:it.site,v:fn(it)};}).filter(function(x){return x.v!=null&&!isNaN(x.v);});arr.sort(function(a,b){return hib?b.v-a.v:a.v-b.v;});var rk={},lv=null,lr=0;for(var i=0;i<arr.length;i++){var r;if(lv!==null&&arr[i].v===lv)r=lr;else{r=i+1;lr=r;lv=arr[i].v;}rk[arr[i].id]=r;}return rk;}
   var N=inc.length,worst=N+1;
-  var rD=rankCol(inc,function(x){return x.deliveroo;},true),rF=rankCol(inc,function(x){return x.food;},true),rR=rankCol(inc,function(x){return x.redPct;},false),rP=rankCol(inc,function(x){return x.passPct;},false);
-  var Wy={del:.10,food:.50,red:.20,pass:.20},Wn={del:0,food:.50,red:.25,pass:.25};
-  inc.forEach(function(r){var w=r.onDeliveroo?Wy:Wn;r.rDel=rD[r.site]||worst;r.rFood=rF[r.site]||worst;r.rRed=rR[r.site]||worst;r.rPass=rP[r.site]||worst;r.score=+(r.rDel*w.del+r.rFood*w.food+r.rRed*w.red+r.rPass*w.pass).toFixed(3);});
+  var rF=rankCol(inc,function(x){return x.food;},true),rR=rankCol(inc,function(x){return x.redPct;},false),rP=rankCol(inc,function(x){return x.passPct;},false);
+  var W=LB_WEIGHTS;
+  inc.forEach(function(r){r.rFood=rF[r.site]||worst;r.rRed=rR[r.site]||worst;r.rPass=rP[r.site]||worst;r.score=+(r.rFood*W.food+r.rRed*W.red+r.rPass*W.pass).toFixed(3);});
   inc.sort(function(a,b){return a.score-b.score||(b.food||0)-(a.food||0);});
   var rank=0,ls=null,lf=null;inc.forEach(function(r,i){if(ls!==null&&r.score===ls&&r.food===lf)r.rank=rank;else{rank=i+1;r.rank=rank;ls=r.score;lf=r.food;}});
   var pendingRows=all.filter(function(r){return inc.indexOf(r)===-1;}).sort(function(a,b){return a.site<b.site?-1:1;});
@@ -627,15 +658,12 @@ function renderLeaderboard(d){
   var sv=document.getElementById('lbSaveBtn'); if(sv)sv.style.display=editable?'':'none';
   if(!lbRows.length){document.getElementById('lbTable').innerHTML='<div class="empty">No sites found.<br>Fill in Food (and Deliveroo for Deliveroo sites).</div>';}
   else{
-    var h='<table><thead><tr><th>Rank</th><th>Site</th><th class="num">Food</th><th class="num">Red ticket</th><th class="num">Passmaster</th><th class="num">Deliveroo</th><th>On&nbsp;Del.</th><th class="num">Weighted total</th></tr></thead><tbody>';
+    var h='<table><thead><tr><th>Rank</th><th>Site</th><th class="num">Food</th><th class="num">Red ticket</th><th class="num">Passmaster</th><th class="num">Weighted total</th></tr></thead><tbody>';
     lbRows.forEach(function(r,i){
       var ranked=(r.rank!=null);
       var medal=r.rank===1?'<span class="medal g">1</span>':r.rank===2?'<span class="medal s">2</span>':r.rank===3?'<span class="medal b">3</span>':(ranked?'<span class="rankn">'+r.rank+'</span>':'<span class="rankn">–</span>');
-      var delTint=(r.onDeliveroo&&r.deliveroo!=null)?(r.deliveroo>=4.65?'sgood':'sbad'):'';
       var foodTint=(r.food!=null)?(r.food>=7?'sgood':'sbad'):'';
-      var delDis=(!editable||!r.onDeliveroo)?'disabled':'';
       var foodDis=editable?'':'disabled';
-      var delRk=(r.onDeliveroo&&ranked)?'<span class="rk">'+r.rDel+'</span>':'<span class="rk rk-empty"></span>';
       var foodRk=ranked?'<span class="rk">'+r.rFood+'</span>':'<span class="rk rk-empty"></span>';
       var redRk=ranked?'<span class="rk">'+r.rRed+'</span>':'', passRk=ranked?'<span class="rk">'+r.rPass+'</span>':'';
       // Colour by the ACTUAL tolerance, not by rank position — a site is only red if its own
@@ -645,8 +673,6 @@ function renderLeaderboard(d){
         '<td class="num"><input class="score '+foodTint+'" id="food_'+i+'" value="'+(r.food==null?'':r.food)+'" '+foodDis+'>'+foodRk+'</td>'+
         '<td class="num"><span class="mcell '+redTint+'">'+fmtPct(r.redPct)+'</span>'+redRk+'</td>'+
         '<td class="num"><span class="mcell '+passTint+'">'+fmtPct(r.passPct)+'</span>'+passRk+'</td>'+
-        '<td class="num"><input class="score '+delTint+'" id="del_'+i+'" value="'+(r.deliveroo==null?'':r.deliveroo)+'" '+delDis+'>'+delRk+'</td>'+
-        '<td><input type="checkbox" id="ond_'+i+'" '+(r.onDeliveroo?'checked':'')+' '+(editable?'':'disabled')+' onchange="document.getElementById(\'del_'+i+'\').disabled=!this.checked"></td>'+
         '<td class="num">'+(ranked?'<span class="scoreb">'+r.score+'</span>':'')+'</td></tr>';
     });
     document.getElementById('lbTable').innerHTML=h+'</tbody></table>';
@@ -666,8 +692,7 @@ function bandTint(v,b){if(v==null||!b)return 'na';return v<b.green?'good':(v<b.a
 var WOW_METRICS=[
   {key:'food',      lab:'Food',       rk:'rFood', dp:1, pts:false, up:true,  fmt:function(v){return v==null?'—':v.toFixed(1);},  tint:function(v){return v==null?'na':(v>=7?'good':'bad');}},
   {key:'redPct',    lab:'Red ticket', rk:'rRed',  dp:1, pts:true,  up:false, band:'red',  fmt:function(v){return fmtPct(v);}},
-  {key:'passPct',   lab:'Passmaster', rk:'rPass', dp:1, pts:true,  up:false, band:'pass', fmt:function(v){return fmtPct(v);}},
-  {key:'deliveroo', lab:'Deliveroo',  rk:'rDel',  dp:2, pts:false, up:true,  fmt:function(v){return v==null?'—':v.toFixed(2);},  tint:function(v){return v==null?'na':(v>=4.65?'good':'bad');}}
+  {key:'passPct',   lab:'Passmaster', rk:'rPass', dp:1, pts:true,  up:false, band:'pass', fmt:function(v){return fmtPct(v);}}
 ];
 function ordinal(n){if(n==null)return '–';var v=n%100;if(v>=11&&v<=13)return n+'th';return n+(['th','st','nd','rd'][n%10]||'th');}
 function wowUnitShort(){return DELTA_UNIT==='week'?'v pw':(DELTA_UNIT==='quarter'?'v pq':'v pp');}
@@ -703,9 +728,8 @@ function renderWow(d){
     WOW_METRICS.forEach(function(m){
       var v=r[m.key],pv=p?p[m.key]:null;
       var tint=m.band?bandTint(v,lbBands()[m.band]):(m.tint?m.tint(v):'na');
-      var showRank=(m.key!=='deliveroo')||r.onDeliveroo;
       h+='<td class="metric"><div class="wowv"><span class="mcell wowbox '+tint+'">'+m.fmt(v)+'</span>'+
-         (showRank?'<span class="wowrk">'+ordinal(r[m.rk])+'</span>':'')+'</div>'+
+         '<span class="wowrk">'+ordinal(r[m.rk])+'</span>'+'</div>'+
          '<div class="wowd">'+wowDelta(v,pv,m.dp,m.pts,m.up)+'</div></td>';
     });
     // Weighted total is the ranking figure — value only, no week-on-week line under it.
@@ -719,12 +743,16 @@ function lbRenderAll(){var d=computeLeaderboard();renderLeaderboard(d);renderWow
 function saveScores(){
   var wk=buildKey();
   if(!/^P\d+W\d+$/i.test(wk.replace(/^\d{2}\|/,''))){document.getElementById('lbErr').textContent='Pick a single Week to save.';return;}
-  var list=lbRows.map(function(r,i){return{site:r.site,onDeliveroo:document.getElementById('ond_'+i).checked,deliveroo:document.getElementById('del_'+i).value,food:document.getElementById('food_'+i).value};});
+  // Deliveroo is no longer edited here, so it is deliberately NOT sent — saveManualScores only
+  // writes the fields it receives, leaving existing Deliveroo scores in the sheet untouched.
+  var list=lbRows.map(function(r,i){return{site:r.site,food:document.getElementById('food_'+i).value};});
   document.getElementById('lbSaved').innerHTML='<span class="spin"></span> saving…';document.getElementById('lbErr').textContent='';
   API.withSuccessHandler(function(res){
     if(res.ok){
       list.forEach(function(item){var m=MANUAL&&MANUAL.filter(function(x){return x.site===item.site;})[0];
-        if(m){m.onDeliveroo=item.onDeliveroo;m.deliveroo=(item.deliveroo===''||item.deliveroo==null)?null:parseFloat(item.deliveroo);m.food=(item.food===''||item.food==null)?null:parseFloat(item.food);}});
+        // Only mirror the fields we actually sent, or the Deliveroo value held in memory (and shown
+        // on the Overview tile) would be blanked out by a save that never touched it.
+        if(m){m.food=(item.food===''||item.food==null)?null:parseFloat(item.food);}});
       document.getElementById('lbSaved').textContent='Saved.';toast('Scores saved');lbRenderAll();
     }else{document.getElementById('lbSaved').textContent='';document.getElementById('lbErr').textContent=res.errors.join('  ·  ');}
   }).withFailureHandler(function(e){toast('Save failed');}).saveManualScores(list,wk);
