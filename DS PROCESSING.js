@@ -191,6 +191,7 @@ function onOpen() {
       .addItem('Audit Missing Days', 'auditMissingDays')
       .addItem('Audit Screen Coverage', 'auditScreenCoverage')
       .addItem('Check Cell (site/date/screen)', 'checkCell')
+      .addItem('Passmaster Check Panel', 'setupPassmasterCheck')
       .addItem('Passmaster Group Extract', 'exportPassmasterGroups')
       .addItem('Apply Dashboard Colours', 'applyDashboardColours')
       .addSeparator()
@@ -1132,24 +1133,13 @@ var PM_MIN_GROUPS_FOR_AUTO = 40; // ignore tiny samples when auto-picking the "b
 
 function exportPassmasterGroups() {
   var ss = getSpreadsheet_();
+  // Creates the panel on first use and upgrades the old plain layout in place, keeping any inputs.
   var ctl = ss.getSheetByName(PM_CHECK_SHEET);
-  if (!ctl) {
-    ctl = ss.insertSheet(PM_CHECK_SHEET);
-    ctl.getRange('A1:A3').setValues([['Site (contains):'], ['Date (dd/mm/yyyy):'], ['Shift (Lunch/Dinner):']]).setFontWeight('bold');
-    ctl.getRange('A5').setValue('Leave all three blank to auto-pick the worst busy shift.').setFontStyle('italic').setFontColor('#5f6368');
-    ctl.setColumnWidth(1, 170); ctl.setColumnWidth(2, 280);
-    // Deliberately NOT returning here. Blank inputs are a valid request (auto-pick), so making the
-    // first run a dead end that only creates an empty tab would be pointless friction.
-  }
+  if (!pmIsPanel_(ctl)) ctl = pmBuildPanel_(ss);
 
-  var siteIn = String(ctl.getRange('B1').getValue() || '').trim();
-  var dateIn = ctl.getRange('B2').getValue();
-  var shiftIn = String(ctl.getRange('B3').getValue() || '').trim();
-
-  var target = pmRetry_('reading Range_Summary', function () {
-    return (siteIn || dateIn) ? pmTargetFromInput_(siteIn, dateIn, shiftIn) : pmWorstTarget_();
-  });
-  if (!target) { pmWriteResult_(ctl, 'Could not resolve a site/date/shift. Check Range_Summary has data and the site name matches.'); return; }
+  var inp = pmReadInputs_(ctl);
+  var target = pmRetry_('reading Range_Summary', function () { return pmPickTarget_(inp.site, inp.date, inp.shift); });
+  if (!target) { pmWriteResult_(ctl, 'No matching shift found in Range_Summary for the choices above.', 'Try clearing Date or Shift to widen the search.'); return; }
 
   // The file that owns this cell is the one the metric used, so re-run exactly that one.
   var owner = pmFindOwner_(target);
@@ -1224,45 +1214,199 @@ function exportPassmasterGroups() {
   var msg = target.site + ' - ' + formatUk_(target.date) + (target.shift ? ' ' + target.shift : '') +
     ': ' + groupRows.length + ' order groups, ' + over + ' over ' + settings.rangeToleranceMinutes + ' min = ' +
     (pct * 100).toFixed(1) + '% Passmaster range.';
-  pmWriteResult_(ctl, msg + '  See Passmaster_Groups and Passmaster_Tickets.');
+  function chan(b) { return (b && b.n) ? (b.over / b.n * 100).toFixed(1) + '% of ' + b.n : 'none'; }
+  pmWriteResult_(ctl,
+    target.site + '  ·  ' + formatUk_(target.date) + (target.shift ? ' ' + target.shift : '') + '  —  ' +
+      (pct * 100).toFixed(1) + '%  (' + over + ' of ' + groupRows.length + ' groups over ' + settings.rangeToleranceMinutes + ' min)',
+    'Delivery ' + chan(split.Delivery) + '      Dine-in ' + chan(split['Dine-in']) + '      →  see Passmaster_Groups and Passmaster_Tickets',
+    pct);
   log_('INFO', 'Passmaster extract - ' + msg);
   toast_(msg);
   return { site: target.site, date: formatUk_(target.date), shift: target.shift, groups: groupRows.length, over: over, pct: pct };
 }
 
-function pmWriteResult_(ctl, text) {
-  ctl.getRange('A7').setValue('Result:').setFontWeight('bold');
-  ctl.getRange('B7').setValue(text).setWrap(true);
+/* ---------- the Passmaster_Check control panel ---------- */
+
+var PM_PANEL_TITLE = 'PASSMASTER CHECK';
+var PM_CELL = { site: 'B4', date: 'B5', shift: 'B6' };
+var PM_RESULT_ROW = 9;
+
+// Menu entry: build (or refresh) the panel without running the heavier extract.
+function setupPassmasterCheck() {
+  pmBuildPanel_(getSpreadsheet_());
+  toast_('Passmaster Check panel ready - pick a site, date and shift, then run Passmaster Group Extract.');
 }
 
-// Worst = highest range % among shifts with a meaningful number of groups, so a 3-group outlier
-// never beats a genuinely bad busy service.
-function pmWorstTarget_() {
+function pmIsPanel_(ctl) { return !!ctl && String(ctl.getRange('A1').getValue()).trim() === PM_PANEL_TITLE; }
+
+// Reads the inputs from either layout, so upgrading an old panel never loses what was typed.
+function pmReadInputs_(ctl) {
+  if (!ctl) return { site: '', date: '', shift: '' };
+  var a = pmIsPanel_(ctl) ? [PM_CELL.site, PM_CELL.date, PM_CELL.shift] : ['B1', 'B2', 'B3'];
+  return {
+    site: String(ctl.getRange(a[0]).getValue() || '').trim(),
+    date: ctl.getRange(a[1]).getValue(),
+    shift: String(ctl.getRange(a[2]).getValue() || '').trim()
+  };
+}
+
+// Sites and the date span, from the same Range_Summary the extract resolves against - so every
+// option in the dropdown is one the extract can actually find.
+function pmSiteInfo_() {
+  var sh = getOutputSheet_(SHEETS.RANGE_SUMMARY), last = sh.getLastRow();
+  if (last < 2) return { sites: [], min: null, max: null };
+  var h = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  var iL = h.indexOf('Location'), iD = h.indexOf('Date');
+  var locs = sh.getRange(2, iL + 1, last - 1, 1).getValues(), dates = sh.getRange(2, iD + 1, last - 1, 1).getValues();
+  var seen = {}, sites = [], min = null, max = null;
+  for (var i = 0; i < locs.length; i++) {
+    var L = String(locs[i][0] || ''); if (L && !seen[L]) { seen[L] = 1; sites.push(L); }
+    var d = dates[i][0]; if (d instanceof Date) { if (!min || d < min) min = d; if (!max || d > max) max = d; }
+  }
+  sites.sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; });
+  return { sites: sites, min: min, max: max };
+}
+
+function pmBuildPanel_(ss) {
+  var ctl = ss.getSheetByName(PM_CHECK_SHEET) || ss.insertSheet(PM_CHECK_SHEET);
+  var keep = pmReadInputs_(ctl);
+  var info = pmRetry_('reading site list', pmSiteInfo_);
+
+  var all = ctl.getRange(1, 1, ctl.getMaxRows(), ctl.getMaxColumns());
+  try { all.breakApart(); } catch (e) {}
+  ctl.clear();
+  try { all.clearDataValidations(); } catch (e) {}
+  try { ctl.setConditionalFormatRules([]); } catch (e) {}
+  try { ctl.setHiddenGridlines(true); } catch (e) {}
+  ctl.setFrozenRows(0);
+  ctl.setColumnWidth(1, 120); ctl.setColumnWidth(2, 240); ctl.setColumnWidth(3, 430);
+
+  // Title + how-to.
+  var bar = ctl.getRange('A1:C1'); bar.merge();
+  bar.setValue(PM_PANEL_TITLE).setBackground(PM_BLUE).setFontColor('#ffffff').setFontWeight('bold')
+     .setFontSize(13).setVerticalAlignment('middle');
+  ctl.setRowHeight(1, 32);
+  var how = ctl.getRange('A2:C2'); how.merge();
+  how.setValue('Choose any combination below, then run  KDS Dashboard → Advanced → Passmaster Group Extract.\n' +
+               'Blanks are searched: a site on its own finds that site\'s worst busy shift; leave everything blank for the worst across the estate.')
+     .setFontColor(PM_MUTED).setFontSize(10).setWrap(true).setVerticalAlignment('middle');
+  ctl.setRowHeight(2, 44);
+  ctl.setRowHeight(3, 10);
+
+  // Input rows: label | field | hint.
+  var span = (info.min && info.max) ? formatUk_(info.min) + ' to ' + formatUk_(info.max) : 'no data yet';
+  var rows = [
+    ['Site', 'Leave blank to search every site'],
+    ['Date', 'Leave blank to pick the worst busy shift   ·   data from ' + span],
+    ['Shift', 'Leave blank for either shift']
+  ];
+  rows.forEach(function (r, i) {
+    var row = 4 + i;
+    ctl.setRowHeight(row, 30);
+    ctl.getRange(row, 1).setValue(r[0]).setFontWeight('bold').setFontColor(PM_INK).setFontSize(11).setVerticalAlignment('middle');
+    ctl.getRange(row, 2).setBackground('#ffffff').setFontSize(11).setVerticalAlignment('middle')
+       .setBorder(true, true, true, true, null, null, '#aab4c0', SpreadsheetApp.BorderStyle.SOLID);
+    ctl.getRange(row, 3).setValue('   ' + r[1]).setFontColor('#80868b').setFontStyle('italic').setFontSize(9).setVerticalAlignment('middle');
+  });
+
+  // Dropdowns and a calendar picker - a typo can no longer send the extract looking for a site that
+  // does not exist, and the date field only accepts days that have data.
+  if (info.sites.length) {
+    ctl.getRange(PM_CELL.site).setDataValidation(SpreadsheetApp.newDataValidation()
+      .requireValueInList(info.sites, true).setAllowInvalid(false).setHelpText('Pick a site from the list').build());
+  }
+  var dv = SpreadsheetApp.newDataValidation().setAllowInvalid(false).setHelpText('Double-click for a calendar');
+  dv = (info.min && info.max) ? dv.requireDateBetween(info.min, info.max) : dv.requireDate();
+  ctl.getRange(PM_CELL.date).setDataValidation(dv.build()).setNumberFormat('dd/mm/yyyy').setHorizontalAlignment('left');
+  ctl.getRange(PM_CELL.shift).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(['Lunch', 'Dinner'], true).setAllowInvalid(false).build());
+
+  // Put back whatever was already chosen, if it is still valid.
+  if (keep.site && info.sites.indexOf(keep.site) >= 0) ctl.getRange(PM_CELL.site).setValue(keep.site);
+  if (keep.date instanceof Date) ctl.getRange(PM_CELL.date).setValue(keep.date);
+  if (/^(lunch|dinner)$/i.test(keep.shift)) ctl.getRange(PM_CELL.shift).setValue(keep.shift.charAt(0).toUpperCase() + keep.shift.slice(1).toLowerCase());
+
+  // Result block.
+  ctl.setRowHeight(7, 14);
+  var rb = ctl.getRange(PM_RESULT_ROW - 1, 1, 1, 3); rb.merge();
+  rb.setValue('LAST RESULT').setBackground('#3c4043').setFontColor('#ffffff').setFontWeight('bold').setFontSize(10).setVerticalAlignment('middle');
+  ctl.setRowHeight(PM_RESULT_ROW - 1, 24);
+  ['Result', 'By channel', 'Run'].forEach(function (lab, i) {
+    var r = PM_RESULT_ROW + i;
+    ctl.getRange(r, 1).setValue(lab).setFontWeight('bold').setFontColor(PM_MUTED).setFontSize(10).setVerticalAlignment('middle');
+    try { ctl.getRange(r, 2, 1, 2).merge(); } catch (e) {}
+    ctl.getRange(r, 2).setFontSize(10).setVerticalAlignment('middle').setWrap(true);
+    ctl.setRowHeight(r, i === 0 ? 34 : 24);
+  });
+  ctl.getRange(PM_RESULT_ROW, 2).setValue('Not run yet').setFontColor('#9aa0a6').setFontStyle('italic');
+
+  try { ss.setActiveSheet(ctl); ctl.setActiveSelection(PM_CELL.site); } catch (e) {}
+  return ctl;
+}
+
+// headline is coloured against the Passmaster bands when a rate is supplied; errors stay neutral.
+function pmWriteResult_(ctl, headline, detail, pct) {
+  if (!pmIsPanel_(ctl)) ctl = pmBuildPanel_(ctl.getParent());
+  var r = PM_RESULT_ROW, band = (pct == null) ? { bg: '#f1f3f4', fg: PM_INK } : pmPassBand_(pct);
+  ctl.getRange(r, 2).setValue(headline).setFontWeight('bold').setFontSize(11).setFontStyle('normal')
+     .setBackground(band.bg).setFontColor(band.fg);
+  ctl.getRange(r + 1, 2).setValue(detail || '').setFontColor(PM_INK);
+  ctl.getRange(r + 2, 2).setValue(Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd/MM/yyyy HH:mm'))
+     .setFontColor(PM_MUTED).setFontSize(9);
+}
+
+function pmPassBand_(pct) {
+  var b = (typeof CONFIG !== 'undefined' && CONFIG.LB_BANDS && CONFIG.LB_BANDS.pass) || { green: 0.15, amber: 0.20 };
+  if (pct < b.green) return { bg: '#e6f4ea', fg: '#137333' };
+  if (pct < b.amber) return { bg: '#fef7e0', fg: '#8a5a00' };
+  return { bg: '#fce8e6', fg: '#a50e0e' };
+}
+
+/**
+ * Turn the panel inputs into one site / date / shift.
+ *   site + date        -> exactly that (shift optional)
+ *   anything less      -> the worst busy shift matching whatever WAS filled in
+ * "Busy" means at least PM_MIN_GROUPS_FOR_AUTO groups, so a quiet three-group shift can't win; if
+ * nothing that busy matches the filters, the threshold is dropped rather than returning nothing.
+ */
+function pmPickTarget_(siteIn, dateIn, shiftIn) {
   var v = getOutputSheet_(SHEETS.RANGE_SUMMARY).getDataRange().getValues();
   if (v.length < 2) return null;
   var h = v[0], iLoc = h.indexOf('Location'), iDate = h.indexOf('Date'), iShift = h.indexOf('Shift'),
       iTot = h.indexOf('Total_Orders'), iOver = h.indexOf('Over_5_Min_Orders');
-  var best = null;
-  for (var i = 1; i < v.length; i++) {
-    var tot = Number(v[i][iTot]) || 0, d = v[i][iDate];
-    if (tot < PM_MIN_GROUPS_FOR_AUTO || !(d instanceof Date)) continue;
-    var pct = (Number(v[i][iOver]) || 0) / tot;
-    if (!best || pct > best.pct) best = { site: String(v[i][iLoc]), date: new Date(d.getFullYear(), d.getMonth(), d.getDate()), shift: String(v[i][iShift] || ''), pct: pct };
-  }
-  return best;
-}
 
-function pmTargetFromInput_(siteIn, dateIn, shiftIn) {
-  var d = parseFlexDate_(dateIn);
-  if (!d) { var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(dateIn).trim()); if (m) d = new Date(+m[3], +m[2] - 1, +m[1]); }
-  if (!d) return null;
-  // Resolve a partial site name ("wimb") to the full Location string the data uses.
-  var want = siteIn.toLowerCase(), site = null;
-  var v = getOutputSheet_(SHEETS.RANGE_SUMMARY).getDataRange().getValues(), iLoc = v[0].indexOf('Location');
-  for (var i = 1; i < v.length && !site; i++) { var L = String(v[i][iLoc] || ''); if (want && L.toLowerCase().indexOf(want) >= 0) site = L; }
-  if (!site) return null;
-  var sh = shiftIn ? (shiftIn.toLowerCase().charAt(0) === 'd' ? 'Dinner' : 'Lunch') : '';
-  return { site: site, date: d, shift: sh };
+  var want = String(siteIn || '').trim().toLowerCase();
+  var d = null;
+  if (dateIn instanceof Date) d = new Date(dateIn.getFullYear(), dateIn.getMonth(), dateIn.getDate());
+  else if (String(dateIn || '').trim()) {
+    var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(dateIn).trim());
+    d = m ? new Date(+m[3], +m[2] - 1, +m[1]) : parseFlexDate_(dateIn);
+  }
+  var dk = d ? dateKey_(d) : null;
+  var sh = shiftIn ? (String(shiftIn).toLowerCase().charAt(0) === 'd' ? 'Dinner' : 'Lunch') : '';
+
+  if (want && d) {
+    for (var i = 1; i < v.length; i++) {
+      var L = String(v[i][iLoc] || '');
+      if (L.toLowerCase().indexOf(want) >= 0) return { site: L, date: d, shift: sh };
+    }
+    return null;
+  }
+
+  function search(minGroups) {
+    var best = null;
+    for (var j = 1; j < v.length; j++) {
+      var row = v[j], tot = Number(row[iTot]) || 0, rd = row[iDate];
+      if (tot < minGroups || tot <= 0 || !(rd instanceof Date)) continue;
+      if (want && String(row[iLoc] || '').toLowerCase().indexOf(want) < 0) continue;
+      if (dk && dateKey_(rd) !== dk) continue;
+      if (sh && String(row[iShift]) !== sh) continue;
+      var p = (Number(row[iOver]) || 0) / tot;
+      if (!best || p > best.pct) best = { site: String(row[iLoc]), date: new Date(rd.getFullYear(), rd.getMonth(), rd.getDate()), shift: String(row[iShift] || ''), pct: p };
+    }
+    return best;
+  }
+  return search(PM_MIN_GROUPS_FOR_AUTO) || search(1);
 }
 
 // Apps Script throws a transient "Service Spreadsheets timed out" when the workbook is busy
