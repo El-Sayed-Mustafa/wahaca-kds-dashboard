@@ -1127,8 +1127,8 @@ function exportPassmasterGroups() {
     ctl.getRange('A1:A3').setValues([['Site (contains):'], ['Date (dd/mm/yyyy):'], ['Shift (Lunch/Dinner):']]).setFontWeight('bold');
     ctl.getRange('A5').setValue('Leave all three blank to auto-pick the worst busy shift.').setFontStyle('italic').setFontColor('#5f6368');
     ctl.setColumnWidth(1, 170); ctl.setColumnWidth(2, 280);
-    toast_('Fill B1/B2/B3 on ' + PM_CHECK_SHEET + ' (or leave blank) and run again.');
-    return;
+    // Deliberately NOT returning here. Blank inputs are a valid request (auto-pick), so making the
+    // first run a dead end that only creates an empty tab would be pointless friction.
   }
 
   var siteIn = String(ctl.getRange('B1').getValue() || '').trim();
@@ -1148,7 +1148,9 @@ function exportPassmasterGroups() {
   catch (e) { pmWriteResult_(ctl, 'The owning raw file is no longer in Drive (id ' + fileId + ').'); return; }
 
   var settings = getSettings_(), periodMap = buildPeriodMap_(), stationMap = getStationMap_();
-  var res = processCsvFile_(file, settings, periodMap, stationMap, dayIndex, fileId, { forceDetail: true });
+  var res;
+  try { res = processCsvFile_(file, settings, periodMap, stationMap, dayIndex, fileId, { forceDetail: true }); }
+  catch (e) { pmWriteResult_(ctl, 'Could not read the raw file "' + file.getName() + '": ' + e.message); return; }
 
   var dk = dateKey_(target.date);
   function keep(loc, date, shift) {
