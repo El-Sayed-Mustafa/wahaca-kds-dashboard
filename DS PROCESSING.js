@@ -1135,13 +1135,15 @@ function exportPassmasterGroups() {
   var dateIn = ctl.getRange('B2').getValue();
   var shiftIn = String(ctl.getRange('B3').getValue() || '').trim();
 
-  var target = (siteIn || dateIn) ? pmTargetFromInput_(siteIn, dateIn, shiftIn) : pmWorstTarget_();
+  var target = pmRetry_('reading Range_Summary', function () {
+    return (siteIn || dateIn) ? pmTargetFromInput_(siteIn, dateIn, shiftIn) : pmWorstTarget_();
+  });
   if (!target) { pmWriteResult_(ctl, 'Could not resolve a site/date/shift. Check Range_Summary has data and the site name matches.'); return; }
 
   // The file that owns this cell is the one the metric used, so re-run exactly that one.
-  var dayIndex = loadDayIndex_();
-  var fileId = pmOwningFileId_(dayIndex, target);
-  if (!fileId) { pmWriteResult_(ctl, 'No raw file is recorded in DayIndex for ' + target.site + ' on ' + formatUk_(target.date) + '. It may have been archived.'); return; }
+  var owner = pmFindOwner_(target);
+  if (!owner) { pmWriteResult_(ctl, 'No raw file is recorded in DayIndex for ' + target.site + ' on ' + formatUk_(target.date) + '. It may have been archived.'); return; }
+  var fileId = owner.fileId, dayIndex = owner.claims;
 
   var file;
   try { file = DriveApp.getFileById(fileId); }
@@ -1180,8 +1182,8 @@ function exportPassmasterGroups() {
   groupRows.forEach(function (r) { if (r[9] === 'OVER') over++; });
   var pct = groupRows.length ? over / groupRows.length : 0;
 
-  pmWriteGroups_(ss, groupRows, target, settings, over, pct);
-  pmWriteTickets_(ss, ticketRows, target, settings);
+  pmRetry_('writing Passmaster_Groups', function () { pmWriteGroups_(ss, groupRows, target, settings, over, pct); });
+  pmRetry_('writing Passmaster_Tickets', function () { pmWriteTickets_(ss, ticketRows, target, settings); });
 
   var msg = target.site + ' - ' + formatUk_(target.date) + (target.shift ? ' ' + target.shift : '') +
     ': ' + groupRows.length + ' order groups, ' + over + ' over ' + settings.rangeToleranceMinutes + ' min = ' +
@@ -1227,15 +1229,56 @@ function pmTargetFromInput_(siteIn, dateIn, shiftIn) {
   return { site: site, date: d, shift: sh };
 }
 
-// DayIndex keys are 'location|dateKey|screen|shift' -> owning fileId.
-function pmOwningFileId_(dayIndex, target) {
-  var dk = dateKey_(target.date), prefix = target.site + '|' + dk + '|';
-  for (var k in dayIndex) {
-    if (k.indexOf(prefix) !== 0) continue;
-    if (target.shift && k.split('|')[3] !== target.shift) continue;
-    if (dayIndex[k]) return dayIndex[k];
+// Apps Script throws a transient "Service Spreadsheets timed out" when the workbook is busy
+// (a refresh trigger mid-run, say). Retry with backoff rather than losing the whole extract to a blip.
+function pmRetry_(label, fn) {
+  var delay = 2000;
+  for (var attempt = 1; attempt <= 4; attempt++) {
+    try { return fn(); }
+    catch (e) {
+      var msg = String((e && e.message) || e);
+      if (attempt === 4 || msg.indexOf('timed out') < 0) throw e;
+      log_('WARN', 'Passmaster extract: ' + label + ' timed out, retrying (' + attempt + ').');
+      Utilities.sleep(delay); delay *= 2;
+    }
   }
-  return null;
+}
+
+/**
+ * Find the raw file that owns one site+date, WITHOUT pulling the whole DayIndex into memory.
+ * DayIndex carries a row per location/date/screen/shift and runs to tens of thousands of rows in
+ * the main workbook, so loadDayIndex_() was timing the document out just to answer one lookup.
+ * Reads in chunks and stops at the first match.
+ *
+ * Also returns the claims for that site+date only, which is all processCsvFile_ needs to reproduce
+ * the de-duplication for the rows we are about to show.
+ */
+var PM_SCAN_CHUNK = 2000;
+function pmFindOwner_(target) {
+  var sh;
+  try { sh = getOutputSheet_(SHEETS.DAY_INDEX); } catch (e) { return null; }
+  var last = sh.getLastRow();
+  if (!sh || last < 2) return null;
+  var dk = dateKey_(target.date), fileId = null, claims = {};
+  for (var r = 2; r <= last; r += PM_SCAN_CHUNK) {
+    var n = Math.min(PM_SCAN_CHUNK, last - r + 1);
+    var v = pmRetry_('DayIndex scan', function () { return sh.getRange(r, 1, n, 5).getValues(); });
+    for (var i = 0; i < n; i++) {
+      var loc = String(v[i][0] || '').trim();
+      if (loc !== target.site) continue;
+      var d = v[i][1], k = (d instanceof Date) ? dateKey_(d) : String(d);
+      if (k !== dk) continue;
+      var shift = String(v[i][3] || ''), owner = String(v[i][4] || '');
+      claims[loc + '|' + k + '|' + String(v[i][2] || '') + '|' + shift] = owner;
+      if (fileId) continue;
+      if (target.shift && shift !== target.shift) continue;
+      if (owner) fileId = owner;
+    }
+    // Claims for one site+date sit together, so once we have the owner and have passed the block,
+    // there is nothing further to collect.
+    if (fileId && Object.keys(claims).length && r + PM_SCAN_CHUNK > last) break;
+  }
+  return fileId ? { fileId: fileId, claims: claims } : null;
 }
 
 function pmWriteGroups_(ss, rows, target, settings, over, pct) {
