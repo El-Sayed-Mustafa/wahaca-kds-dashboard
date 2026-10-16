@@ -1116,6 +1116,17 @@ function parseRawDateTime_(value) {
  * the worst qualifying site-shift for you.
  */
 
+// Station names carry the order channel: "Edi Del - Mains" is delivery, "Edi - Mains" is dine-in.
+// Delivery orders wait for a driver, so the spread between first and last dish is naturally wider -
+// mixing them with dine-in makes the Passmaster range look worse than the kitchen is performing.
+function pmIsDelivery_(stationRaw) {
+  var s = String(stationRaw == null ? '' : stationRaw).toLowerCase();
+  return /(^|[^a-z])del([^a-z]|$)/.test(s) || s.indexOf('deliveroo') >= 0;
+}
+function pmGroupKeyOfDetail_(d) {
+  return String(d[0]) + '|' + String(d[3]) + '|' + dateKey_(d[1]) + '|' + String(d[5]);
+}
+
 var PM_CHECK_SHEET = 'Passmaster_Check';
 var PM_MIN_GROUPS_FOR_AUTO = 40; // ignore tiny samples when auto-picking the "bad busy day"
 
@@ -1143,43 +1154,68 @@ function exportPassmasterGroups() {
   // The file that owns this cell is the one the metric used, so re-run exactly that one.
   var owner = pmFindOwner_(target);
   if (!owner) { pmWriteResult_(ctl, 'No raw file is recorded in DayIndex for ' + target.site + ' on ' + formatUk_(target.date) + '. It may have been archived.'); return; }
-  var fileId = owner.fileId, dayIndex = owner.claims;
-
-  var file;
-  try { file = DriveApp.getFileById(fileId); }
-  catch (e) { pmWriteResult_(ctl, 'The owning raw file is no longer in Drive (id ' + fileId + ').'); return; }
 
   var settings = getSettings_(), periodMap = buildPeriodMap_(), stationMap = getStationMap_();
-  var res;
-  try { res = processCsvFile_(file, settings, periodMap, stationMap, dayIndex, fileId, { forceDetail: true }); }
-  catch (e) { pmWriteResult_(ctl, 'Could not read the raw file "' + file.getName() + '": ' + e.message); return; }
-
   var dk = dateKey_(target.date);
   function keep(loc, date, shift) {
     return String(loc) === target.site && (date instanceof Date) && dateKey_(date) === dk && (!target.shift || shift === target.shift);
   }
 
-  // --- Extract 1: one row per order group ---
-  var groupRows = [];
-  Object.keys(res.rangeGroups || {}).forEach(function (k) {
-    var g = res.rangeGroups[k], parts = k.split('|');
-    if (!keep(g.loc, g.date, g.shift)) return;
-    groupRows.push([g.loc, g.date, g.shift, parts[1], Number(parts[3]) || parts[3], g.minFired, g.minFulf, g.maxFulf,
-      round1_(g.rangeDuration), g.over5 ? 'OVER' : 'ok', g.count, g.screenCount, g.screensStr]);
-  });
-  groupRows.sort(function (a, b) { return b[8] - a[8]; }); // worst spread first
+  // Re-run every file that owns part of this site-day and merge. The claims map stops a file
+  // contributing cells another file owns, so merging reproduces the metric without double counting.
+  var groupRows = [], ticketRows = [], used = [], skipped = [];
+  owner.fileIds.forEach(function (fid) {
+    var f;
+    try { f = DriveApp.getFileById(fid); }
+    catch (e) { skipped.push(fid.slice(0, 8) + '... (not in Drive)'); return; }
 
-  // --- Extract 2: one row per ticket inside those groups ---
-  var ticketRows = (res.rangeDetailRows || [])
-    .filter(function (d) { return keep(d[0], d[1], d[2]); })
-    .map(function (d) {
+    var claims = {};
+    for (var ck in owner.claims) claims[ck] = owner.claims[ck]; // fresh copy: processCsvFile_ claims as it goes
+
+    var res;
+    try { res = pmRetry_('processing ' + f.getName(), function () { return processCsvFile_(f, settings, periodMap, stationMap, claims, fid, { forceDetail: true }); }); }
+    catch (e) { skipped.push(f.getName() + ' (' + e.message + ')'); return; }
+
+    // A group counts as delivery when any ticket in it came off a delivery station.
+    var delByGroup = {};
+    (res.rangeDetailRows || []).forEach(function (d) {
+      if (pmIsDelivery_(d[6])) delByGroup[pmGroupKeyOfDetail_(d)] = 1;
+    });
+
+    var n = 0;
+    Object.keys(res.rangeGroups || {}).forEach(function (k) {
+      var g = res.rangeGroups[k], parts = k.split('|');
+      if (!keep(g.loc, g.date, g.shift)) return;
+      n++;
+      // Location/date/shift are fixed for the whole extract and live in the header block, so the
+      // rows carry only what varies. Times are times - the date is already stated above.
+      groupRows.push([parts[1], Number(parts[3]) || parts[3], delByGroup[k] ? 'Delivery' : 'Dine-in',
+        g.minFired, g.minFulf, g.maxFulf,
+        round1_(g.rangeDuration), g.over5 ? 'OVER' : 'ok', g.count, g.screenCount, g.screensStr, f.getName()]);
+    });
+
+    (res.rangeDetailRows || []).forEach(function (d) {
+      if (!keep(d[0], d[1], d[2])) return;
       var dur = (d[9] instanceof Date && d[8] instanceof Date) ? round1_((d[9].getTime() - d[8].getTime()) / 60000) : '';
-      return [d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11], dur, d[15], d[16] ? 'OVER' : 'ok'];
-    })
-    .sort(function (a, b) { return (String(a[3]) < String(b[3]) ? -1 : String(a[3]) > String(b[3]) ? 1 : 0) || (a[5] - b[5]) || (a[8] - b[8]); });
+      ticketRows.push([d[3], d[4], d[5], pmIsDelivery_(d[6]) ? 'Delivery' : 'Dine-in', d[6], d[7],
+        d[8], d[9], d[10], d[11], dur, d[15], d[16] ? 'OVER' : 'ok', f.getName()]);
+    });
+
+    used.push(f.getName() + ' - ' + n + ' groups');
+  });
+
+  groupRows.sort(function (a, b) { return b[6] - a[6]; }); // worst spread first
+  ticketRows.sort(function (a, b) { return (String(a[0]) < String(b[0]) ? -1 : String(a[0]) > String(b[0]) ? 1 : 0) || (a[2] - b[2]) || (a[6] - b[6]); });
+  target.sourceFiles = used;
+  target.skippedFiles = skipped;
 
   var over = 0;
-  groupRows.forEach(function (r) { if (r[9] === 'OVER') over++; });
+  groupRows.forEach(function (r) { if (r[7] === 'OVER') over++; });
+  // Split the headline by channel - this is the comparison that shows whether delivery is what is
+  // holding the metric red.
+  var split = { Delivery: { n: 0, over: 0 }, 'Dine-in': { n: 0, over: 0 } };
+  groupRows.forEach(function (r) { var b = split[r[2]]; if (!b) return; b.n++; if (r[7] === 'OVER') b.over++; });
+  target.split = split;
   var pct = groupRows.length ? over / groupRows.length : 0;
 
   pmRetry_('writing Passmaster_Groups', function () { pmWriteGroups_(ss, groupRows, target, settings, over, pct); });
@@ -1259,7 +1295,7 @@ function pmFindOwner_(target) {
   try { sh = getOutputSheet_(SHEETS.DAY_INDEX); } catch (e) { return null; }
   var last = sh.getLastRow();
   if (!sh || last < 2) return null;
-  var dk = dateKey_(target.date), fileId = null, claims = {};
+  var dk = dateKey_(target.date), claims = {}, owners = {}, order = [];
   for (var r = 2; r <= last; r += PM_SCAN_CHUNK) {
     var n = Math.min(PM_SCAN_CHUNK, last - r + 1);
     var v = pmRetry_('DayIndex scan', function () { return sh.getRange(r, 1, n, 5).getValues(); });
@@ -1270,83 +1306,175 @@ function pmFindOwner_(target) {
       if (k !== dk) continue;
       var shift = String(v[i][3] || ''), owner = String(v[i][4] || '');
       claims[loc + '|' + k + '|' + String(v[i][2] || '') + '|' + shift] = owner;
-      if (fileId) continue;
       if (target.shift && shift !== target.shift) continue;
-      if (owner) fileId = owner;
+      // De-duplication is per CELL, so one site-day is often split across several raw files.
+      // Collect every owner, not just the first, or the extract reproduces a fraction of the data.
+      if (owner && !owners[owner]) { owners[owner] = 1; order.push(owner); }
     }
-    // Claims for one site+date sit together, so once we have the owner and have passed the block,
-    // there is nothing further to collect.
-    if (fileId && Object.keys(claims).length && r + PM_SCAN_CHUNK > last) break;
   }
-  return fileId ? { fileId: fileId, claims: claims } : null;
+  return order.length ? { fileIds: order, claims: claims } : null;
 }
 
 function pmWriteGroups_(ss, rows, target, settings, over, pct) {
-  var sh = ss.getSheetByName('Passmaster_Groups') || ss.insertSheet('Passmaster_Groups');
-  sh.clear(); try { sh.setConditionalFormatRules([]); } catch (e) {}
-  var title = [
-    ['PASSMASTER - ORDER GROUPS', ''],
+  var hdr = ['Check #', 'Order Group', 'Type', 'Group Fired', 'First Fulfilled', 'Last Fulfilled',
+             'Range (min)', 'Over?', 'Tickets', 'Screens #', 'Screens', 'Source File'];
+  var sp = target.split || {};
+  function pctOf(b) { return (b && b.n) ? (b.over / b.n * 100).toFixed(1) + '% of ' + b.n : 'none'; }
+  var sh = pmPrepSheet_(ss, 'Passmaster_Groups', 'PASSMASTER — ORDER GROUPS', hdr.length, [
     ['Site', target.site],
-    ['Date / shift', formatUk_(target.date) + (target.shift ? '  ' + target.shift : '  (both shifts)')],
-    ['Tolerance', settings.rangeToleranceMinutes + ' min - a group counts as OVER at or above this'],
-    ['Group gap rule', 'a new order group starts after a ' + settings.orderGroupGapMinutes + ' min gap between fires on the same check'],
-    ['Result', rows.length + ' groups, ' + over + ' over = ' + (pct * 100).toFixed(1) + '% Passmaster range'],
-    ['', '']
-  ];
-  sh.getRange(1, 1, title.length, 2).setValues(title);
-  sh.getRange(1, 1, 1, 2).setFontWeight('bold').setFontColor(DASH_TITLE_FG);
-  sh.getRange(2, 1, title.length - 1, 1).setFontWeight('bold');
-
-  var hdr = ['Location', 'Date', 'Shift', 'Check #', 'Order Group', 'Group Fired', 'First Fulfilled', 'Last Fulfilled',
-             'Range Duration (min)', 'Over?', 'Tickets', 'Screens #', 'Screens'];
-  var r0 = title.length + 1;
-  sh.getRange(r0, 1, 1, hdr.length).setValues([hdr]).setFontWeight('bold').setBackground(DASH_HEADER_BG);
+    ['Date / shift', formatUk_(target.date) + (target.shift ? '   ' + target.shift : '   (both shifts)')],
+    ['Result', rows.length + ' order groups  ·  ' + over + ' over  ·  ' + (pct * 100).toFixed(1) + '% Passmaster range'],
+    ['By channel', 'Delivery ' + pctOf(sp.Delivery) + '      Dine-in ' + pctOf(sp['Dine-in'])],
+    ['Tolerance', settings.rangeToleranceMinutes + ' min — a group is OVER at or above this'],
+    ['Grouping', 'a new order group starts after a ' + settings.orderGroupGapMinutes + ' min gap between fires on the same check'],
+    ['Source', (target.sourceFiles || []).join('   |   ') + ((target.skippedFiles || []).length ? '    SKIPPED: ' + target.skippedFiles.join(', ') : '')]
+  ]);
+  var r0 = pmHeaderRow_(sh, hdr);
   if (rows.length) {
     sh.getRange(r0 + 1, 1, rows.length, hdr.length).setValues(rows);
-    sh.getRange(r0 + 1, 2, rows.length, 1).setNumberFormat('dd/mm/yyyy');
-    sh.getRange(r0 + 1, 6, rows.length, 3).setNumberFormat('dd/mm/yyyy hh:mm:ss');
-    sh.getRange(r0 + 1, 9, rows.length, 1).setNumberFormat('0.0');
-    var rng = [sh.getRange(r0 + 1, 10, rows.length, 1)];
-    sh.setConditionalFormatRules([
-      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('OVER').setBackground(DASH_RED_BG).setBold(true).setRanges(rng).build(),
-      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('ok').setBackground(DASH_GREEN_BG).setRanges(rng).build()
+    sh.getRange(r0 + 1, 4, rows.length, 3).setNumberFormat('HH:mm:ss');
+    sh.getRange(r0 + 1, 7, rows.length, 1).setNumberFormat('0.0').setFontWeight('bold');
+    sh.getRange(r0 + 1, 1, rows.length, 3).setHorizontalAlignment('center');
+    sh.getRange(r0 + 1, 8, rows.length, 3).setHorizontalAlignment('center');
+    pmBody_(sh, r0, rows.length, hdr.length);
+    pmRules_(sh, [
+      pmOverRule_(sh.getRange(r0 + 1, 8, rows.length, 1)),
+      pmOkRule_(sh.getRange(r0 + 1, 8, rows.length, 1)),
+      pmChannelRule_(sh.getRange(r0 + 1, 3, rows.length, 1)),
+      pmHeatRule_(sh.getRange(r0 + 1, 7, rows.length, 1), settings.rangeToleranceMinutes)
     ]);
+  } else {
+    sh.getRange(r0 + 1, 1).setValue('No order groups found for this selection.').setFontStyle('italic').setFontColor('#9aa0a6');
   }
+  [70, 90, 80, 95, 100, 100, 85, 70, 70, 80, 190, 240].forEach(function (w, i) { sh.setColumnWidth(i + 1, w); });
   sh.setFrozenRows(r0);
-  sh.setColumnWidth(1, 180); sh.setColumnWidth(13, 220);
 }
 
 function pmWriteTickets_(ss, rows, target, settings) {
-  var sh = ss.getSheetByName('Passmaster_Tickets') || ss.insertSheet('Passmaster_Tickets');
-  sh.clear(); try { sh.setConditionalFormatRules([]); } catch (e) {}
-  var title = [
-    ['PASSMASTER - TICKETS BEHIND EACH GROUP', ''],
+  var hdr = ['Check #', 'Table', 'Order Group', 'Type', 'Station', 'Screen', 'Fired', 'Fulfilled',
+             'Previous Fired', 'Gap (min)', 'Ticket (min)', 'Group Range (min)', 'Group Over?', 'Source File'];
+  var sh = pmPrepSheet_(ss, 'Passmaster_Tickets', 'PASSMASTER — TICKETS BEHIND EACH GROUP', hdr.length, [
     ['Site', target.site],
-    ['Date / shift', formatUk_(target.date) + (target.shift ? '  ' + target.shift : '  (both shifts)')],
-    ['Read it as', 'Gap Minutes is the time since the previous fire on the same check. Above ' +
-      settings.orderGroupGapMinutes + ' min a NEW order group starts.'],
-    ['', '']
-  ];
-  sh.getRange(1, 1, title.length, 2).setValues(title);
-  sh.getRange(1, 1, 1, 2).setFontWeight('bold').setFontColor(DASH_TITLE_FG);
-  sh.getRange(2, 1, title.length - 1, 1).setFontWeight('bold');
-
-  var hdr = ['Location', 'Date', 'Shift', 'Check #', 'Table', 'Order Group', 'Station', 'Screen',
-             'Fired', 'Fulfilled', 'Previous Fired', 'Gap Minutes', 'Ticket Duration (min)',
-             'Group Range (min)', 'Group Over?'];
-  var r0 = title.length + 1;
-  sh.getRange(r0, 1, 1, hdr.length).setValues([hdr]).setFontWeight('bold').setBackground(DASH_HEADER_BG);
+    ['Date / shift', formatUk_(target.date) + (target.shift ? '   ' + target.shift : '   (both shifts)')],
+    ['Rows', rows.length + ' tickets'],
+    ['Read Gap as', 'time since the previous fire on the same check — above ' + settings.orderGroupGapMinutes + ' min a NEW order group starts'],
+    ['Read Group Range as', 'the spread of the whole group this ticket belongs to, repeated on each of its rows'],
+    ['Type', 'taken from the station name — "Del" marks a delivery order']
+  ]);
+  var r0 = pmHeaderRow_(sh, hdr);
   if (rows.length) {
     sh.getRange(r0 + 1, 1, rows.length, hdr.length).setValues(rows);
-    sh.getRange(r0 + 1, 2, rows.length, 1).setNumberFormat('dd/mm/yyyy');
-    sh.getRange(r0 + 1, 9, rows.length, 3).setNumberFormat('dd/mm/yyyy hh:mm:ss');
-    sh.getRange(r0 + 1, 12, rows.length, 3).setNumberFormat('0.0');
-    var rng = [sh.getRange(r0 + 1, 15, rows.length, 1)];
-    sh.setConditionalFormatRules([
-      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('OVER').setBackground(DASH_RED_BG).setBold(true).setRanges(rng).build(),
-      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('ok').setBackground(DASH_GREEN_BG).setRanges(rng).build()
+    sh.getRange(r0 + 1, 7, rows.length, 3).setNumberFormat('HH:mm:ss');
+    sh.getRange(r0 + 1, 10, rows.length, 3).setNumberFormat('0.0');
+    sh.getRange(r0 + 1, 1, rows.length, 4).setHorizontalAlignment('center');
+    sh.getRange(r0 + 1, 13, rows.length, 1).setHorizontalAlignment('center');
+    pmBody_(sh, r0, rows.length, hdr.length);
+    pmCheckSeparators_(sh, r0, rows, hdr.length);
+    pmRules_(sh, [
+      pmOverRule_(sh.getRange(r0 + 1, 13, rows.length, 1)),
+      pmOkRule_(sh.getRange(r0 + 1, 13, rows.length, 1)),
+      pmChannelRule_(sh.getRange(r0 + 1, 4, rows.length, 1)),
+      // The gap is the mechanism people are trying to understand, so make the splits obvious.
+      SpreadsheetApp.newConditionalFormatRule()
+        .whenNumberGreaterThan(settings.orderGroupGapMinutes)
+        .setBackground('#fff0d4').setFontColor('#8a5a00').setBold(true)
+        .setRanges([sh.getRange(r0 + 1, 10, rows.length, 1)]).build(),
+      pmHeatRule_(sh.getRange(r0 + 1, 12, rows.length, 1), settings.rangeToleranceMinutes)
     ]);
+  } else {
+    sh.getRange(r0 + 1, 1).setValue('No tickets found for this selection.').setFontStyle('italic').setFontColor('#9aa0a6');
   }
+  [70, 60, 85, 80, 150, 90, 85, 85, 100, 80, 85, 115, 95, 240].forEach(function (w, i) { sh.setColumnWidth(i + 1, w); });
   sh.setFrozenRows(r0);
-  sh.setColumnWidth(1, 180);
+}
+
+/* ---------- shared look for both extract sheets ---------- */
+
+var PM_BLUE = '#1a73e8', PM_INK = '#202124', PM_MUTED = '#5f6368', PM_LINE = '#d0d7de';
+
+function pmPrepSheet_(ss, name, title, nCols, meta) {
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+  sh.clear();
+  try { sh.setConditionalFormatRules([]); } catch (e) {}
+  try { sh.getBandings().forEach(function (b) { b.remove(); }); } catch (e) {}
+  try { sh.setHiddenGridlines(true); } catch (e) {}
+  sh.setFrozenRows(0);
+
+  var bar = sh.getRange(1, 1, 1, nCols);
+  try { bar.merge(); } catch (e) {}
+  bar.setValue(title).setBackground(PM_BLUE).setFontColor('#ffffff').setFontWeight('bold')
+     .setFontSize(13).setVerticalAlignment('middle').setHorizontalAlignment('left');
+  sh.setRowHeight(1, 30);
+
+  // Labels span the first two columns: column A is sized for "Check #", which truncates
+  // "Read Group Range as". The value then runs across the next few columns.
+  meta.forEach(function (kv, i) {
+    var r = i + 2;
+    var lab = sh.getRange(r, 1, 1, 2);
+    try { lab.merge(); } catch (e) {}
+    lab.setValue(kv[0]).setFontWeight('bold').setFontColor(PM_MUTED).setFontSize(10)
+       .setHorizontalAlignment('left').setVerticalAlignment('middle');
+    var span = Math.max(1, Math.min(nCols - 2, 8));
+    var val = sh.getRange(r, 3, 1, span);
+    try { val.merge(); } catch (e) {}
+    val.setValue(kv[1]).setFontColor(PM_INK).setFontSize(10).setHorizontalAlignment('left').setVerticalAlignment('middle');
+  });
+  sh.getRange(3, 3).setFontWeight('bold'); // date / shift
+  sh.getRange(4, 3).setFontWeight('bold'); // headline result
+  return sh;
+}
+
+function pmHeaderRow_(sh, hdr) {
+  var r0 = sh.getLastRow() + 2; // one blank row between the block and the table
+  sh.getRange(r0, 1, 1, hdr.length).setValues([hdr])
+    .setBackground('#3c4043').setFontColor('#ffffff').setFontWeight('bold').setFontSize(10)
+    .setVerticalAlignment('middle').setHorizontalAlignment('center');
+  sh.setRowHeight(r0, 26);
+  return r0;
+}
+
+function pmBody_(sh, r0, nRows, nCols) {
+  var body = sh.getRange(r0 + 1, 1, nRows, nCols);
+  body.setFontSize(10).setVerticalAlignment('middle');
+  body.setBorder(null, null, null, null, null, true, '#eceff2', SpreadsheetApp.BorderStyle.SOLID);
+  try { body.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, false, false); } catch (e) {}
+}
+
+// Draw a line where the check number changes, so each order reads as its own block. The extract is
+// a static snapshot, so a real border is fine here - no slicer can shift the rows underneath it.
+function pmCheckSeparators_(sh, r0, rows, nCols) {
+  var last = null, starts = [];
+  for (var i = 0; i < rows.length; i++) {
+    var c = String(rows[i][0]);
+    if (last !== null && c !== last) starts.push(r0 + 1 + i);
+    last = c;
+  }
+  for (var j = 0; j < starts.length && j < 400; j++) {
+    sh.getRange(starts[j], 1, 1, nCols)
+      .setBorder(true, null, null, null, null, null, '#9aa0a6', SpreadsheetApp.BorderStyle.SOLID);
+  }
+}
+
+function pmRules_(sh, rules) { sh.setConditionalFormatRules(rules.filter(Boolean)); }
+function pmOverRule_(rng) {
+  return SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('OVER')
+    .setBackground(DASH_RED_BG).setFontColor('#a50e0e').setBold(true).setRanges([rng]).build();
+}
+function pmOkRule_(rng) {
+  return SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('ok')
+    .setBackground(DASH_GREEN_BG).setFontColor('#137333').setRanges([rng]).build();
+}
+function pmChannelRule_(rng) {
+  return SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Delivery')
+    .setBackground('#ede7f6').setFontColor('#4527a0').setBold(true).setRanges([rng]).build();
+}
+// Green at zero, amber at the tolerance, red at twice it - severity readable at a glance.
+function pmHeatRule_(rng, tol) {
+  try {
+    return SpreadsheetApp.newConditionalFormatRule()
+      .setGradientMinpointWithValue('#e6f4ea', SpreadsheetApp.InterpolationType.NUMBER, '0')
+      .setGradientMidpointWithValue('#fef7e0', SpreadsheetApp.InterpolationType.NUMBER, String(tol))
+      .setGradientMaxpointWithValue('#f4c7c3', SpreadsheetApp.InterpolationType.NUMBER, String(tol * 2))
+      .setRanges([rng]).build();
+  } catch (e) { return null; }
 }
