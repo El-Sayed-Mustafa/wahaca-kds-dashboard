@@ -1294,11 +1294,11 @@ function pmBuildPanel_(ss) {
   ctl.setRowHeight(3, 10);
 
   // Input rows: label | field | hint.
-  var span = (info.min && info.max) ? formatUk_(info.min) + ' to ' + formatUk_(info.max) : 'no data yet';
+  var span = (info.min && info.max) ? formatUk_(info.min) + ' – ' + formatUk_(info.max) : 'none yet';
   var rows = [
-    ['Site', 'Leave blank to search every site'],
-    ['Date', 'Leave blank to pick the worst busy shift   ·   data from ' + span],
-    ['Shift', 'Leave blank for either shift']
+    ['Site', 'Blank = every site'],
+    ['Date', 'Blank = worst busy shift   ·   data ' + span],
+    ['Shift', 'Blank = either shift']
   ];
   rows.forEach(function (r, i) {
     var row = 4 + i;
