@@ -204,6 +204,7 @@ function onOpen() {
       .addItem('Clear Logs', 'clearLogs'))
     .addToUi();
   } catch (e) { Logger.log('onOpen (no UI context): ' + e.message); }
+  try { pmRelaxDateField_(); } catch (e) { Logger.log('onOpen date field: ' + e.message); }
 }
 
 /* ============================== SCHEDULED CATCH-UP ============================== */
@@ -1294,7 +1295,7 @@ function pmBuildPanel_(ss) {
   ctl.setRowHeight(3, 10);
 
   // Input rows: label | field | hint.
-  var span = (info.min && info.max) ? formatUk_(info.min) + ' – ' + formatUk_(info.max) : 'none yet';
+  var span = info.min ? 'from ' + formatUk_(info.min) : 'none yet';
   var rows = [
     ['Site', 'Blank = every site'],
     ['Date', 'Blank = worst busy shift   ·   data ' + span],
@@ -1315,9 +1316,7 @@ function pmBuildPanel_(ss) {
     ctl.getRange(PM_CELL.site).setDataValidation(SpreadsheetApp.newDataValidation()
       .requireValueInList(info.sites, true).setAllowInvalid(false).setHelpText('Pick a site from the list').build());
   }
-  var dv = SpreadsheetApp.newDataValidation().setAllowInvalid(false).setHelpText('Double-click for a calendar');
-  dv = (info.min && info.max) ? dv.requireDateBetween(info.min, info.max) : dv.requireDate();
-  ctl.getRange(PM_CELL.date).setDataValidation(dv.build()).setNumberFormat('dd/mm/yyyy').setHorizontalAlignment('left');
+  ctl.getRange(PM_CELL.date).setDataValidation(pmDateRule_()).setNumberFormat('dd/mm/yyyy').setHorizontalAlignment('left');
   ctl.getRange(PM_CELL.shift).setDataValidation(SpreadsheetApp.newDataValidation()
     .requireValueInList(['Lunch', 'Dinner'], true).setAllowInvalid(false).build());
 
@@ -1342,6 +1341,24 @@ function pmBuildPanel_(ss) {
 
   try { ss.setActiveSheet(ctl); ctl.setActiveSelection(PM_CELL.site); } catch (e) {}
   return ctl;
+}
+
+// The date field gives a calendar on double-click but ACCEPTS whatever is typed. It used to be
+// strict and capped at the data span on the day the panel was built, which rejected every newer
+// date - and rejected typed UK dates outright in a sheet set to US date order. pmPickTarget_ reads
+// both a real date and dd/mm/yyyy text, so leniency here costs nothing.
+function pmDateRule_() {
+  return SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(true)
+    .setHelpText('Type the date as dd/mm/yyyy, or double-click the cell to pick from a calendar.').build();
+}
+
+// Runs on open, so a panel built with the old strict rule repairs itself without anyone re-running
+// the panel builder. Cheap: one sheet lookup and one validation write.
+function pmRelaxDateField_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(); if (!ss) return;
+  var ctl = ss.getSheetByName(PM_CHECK_SHEET);
+  if (!pmIsPanel_(ctl)) return;
+  ctl.getRange(PM_CELL.date).setDataValidation(pmDateRule_());
 }
 
 // headline is coloured against the Passmaster bands when a rate is supplied; errors stay neutral.
