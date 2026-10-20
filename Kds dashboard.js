@@ -44,7 +44,7 @@ var DASH_DEFS = [
     headers: ['Location','Date','Shift','Period_Week','Period_Week_Order','Period_Week_Label','Day_Name','Day_Order','Shift_Order','Total_Orders','Over_5_Min_Orders','Red Range','Source File ID','Source File Name'],
     rows: ['Period_Week','Location'], cols: ['Day_Name','Shift'], value: 'Red Range', num: 'Over_5_Min_Orders', den: 'Total_Orders',
     slicers: ['Location','Period_Week'],
-    percent: true, greenDef: 0.10, yellowDef: 0.20, redDef: 0.25
+    percent: true, strictGreen: true, greenDef: 0.15, yellowDef: 0.15, redDef: 0.20 // same as the web: <15% green, 15-20% amber, 20%+ red
   },
   {
     title: 'Red Ticket Dashboard', dataTab: '_RedData', caption: 'Red ticket % by day & shift (volume-weighted)',
@@ -52,7 +52,7 @@ var DASH_DEFS = [
     headers: ['Location','Screen','Date','Shift','Period_Week','Period_Week_Order','Period_Week_Label','Day_Name','Day_Order','Shift_Order','Total_Tickets','Over_Tolerance_Tickets','Red ticket %','Source File ID','Source File Name'],
     rows: ['Period_Week','Location','Screen'], cols: ['Day_Name','Shift'], value: 'Red ticket %', num: 'Over_Tolerance_Tickets', den: 'Total_Tickets',
     slicers: ['Screen','Location','Date','Period_Week'],
-    percent: true, greenDef: 0.10, yellowDef: 0.20, redDef: 0.30
+    percent: true, strictGreen: true, greenDef: 0.10, yellowDef: 0.10, redDef: 0.15 // same as the web: <10% green, 10-15% amber, 15%+ red
   },
   {
     title: 'Times Dashboard', dataTab: '_TimesData', caption: 'Average duration (mins) by day & shift',
@@ -77,12 +77,14 @@ function buildKdsDashboards() {
 function refreshKdsDashboards() {
   var ss = dbMain_();
   var out = DASH_DEFS.map(function (d) { return dbRefreshOne_(ss, d); }).filter(Boolean);
+  try { alignDashboardBands_(); } catch (e) { dbLog_('Band alignment: ' + e.message); }
   var msg = 'Dashboard data refreshed: ' + (out.length ? out.join(', ') : 'none (no data?)');
   dbToast_(msg); dbLog_(msg);
 }
 
 // Re-establish the formula colour rules (rarely needed - colours already update live from the cells).
 function applyDashboardColours() {
+  try { alignDashboardBands_(); } catch (e) { dbLog_('Band alignment: ' + e.message); }
   var ss = dbMain_(), done = [];
   DASH_DEFS.forEach(function (def) {
     if (!def.percent && !def.bands) return;
@@ -93,6 +95,26 @@ function applyDashboardColours() {
   });
   var msg = done.length ? 'Colour rules refreshed: ' + done.join(', ') : 'No % dashboards found - build them first.';
   dbToast_(msg); dbLog_(msg);
+}
+
+// Bump when the agreed default bands change. The existing dashboard tabs are moved onto the new
+// defaults ONCE (next refresh, or Apply Dashboard Colours); after that, hand edits to B2/B4 stick.
+var DASH_BANDS_VER = '2';
+function alignDashboardBands_() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('DASH_BANDS_VER') === DASH_BANDS_VER) return [];
+  var ss = dbMain_(), done = [];
+  DASH_DEFS.forEach(function (def) {
+    if (!def.strictGreen) return;
+    var sh = ss.getSheetByName(def.title);
+    if (!sh) return;
+    dbWriteColourControl_(sh, def);
+    dbApplyBandsFormula_(sh, def);
+    done.push(def.title);
+  });
+  props.setProperty('DASH_BANDS_VER', DASH_BANDS_VER);
+  if (done.length) dbLog_('Colour bands aligned with the web dashboard: ' + done.join(', '));
+  return done;
 }
 
 /* ============================== FULL BUILD (structure + format) ============================== */
@@ -243,10 +265,13 @@ function dbAddSlicers_(dash, src, def) {
 function dbWriteColourControl_(dash, def) {
   var unit = def.percent ? '' : ' (mins)';
   dash.getRange('A1').setValue('Colours' + unit).setFontWeight('bold');
-  dash.getRange('A2').setValue('Green \u2264'); dash.getRange('B2').setValue(def.greenDef);
-  dash.getRange('A3').setValue('Yellow');        dash.getRange('B3').setValue(def.yellowDef);
+  dash.getRange('A2').setValue(def.strictGreen ? 'Green <' : 'Green \u2264'); dash.getRange('B2').setValue(def.greenDef);
+  dash.getRange('A3').setValue(def.strictGreen ? 'Amber' : 'Yellow');
   dash.getRange('A4').setValue('Red \u2265');    dash.getRange('B4').setValue(def.redDef);
   dash.getRange('B2:B4').setNumberFormat(def.percent ? '0%' : (def.numFmt || '0.0'));
+  // Amber is whatever sits between the two editable cells, so show it as a live range, not a number.
+  if (def.strictGreen) dash.getRange('B3').setFormula('=TEXT(B2,"0%")&" - "&TEXT(B4,"0%")').setHorizontalAlignment('right');
+  else dash.getRange('B3').setValue(def.yellowDef);
   dash.getRange('B2').setBackground(DASH_GREEN_BG);
   dash.getRange('B3').setBackground(DASH_YELLOW_BG);
   dash.getRange('B4').setBackground(DASH_RED_BG);
@@ -271,9 +296,12 @@ function dbApplyBandsFormula_(dash, def) {
   rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=ISNUMBER(SEARCH("Total",$A' + dataStart + '))').setBackground(DASH_TOTAL_BG).setFontColor('#ffffff').setBold(true).setRanges([area]).build());
   if (rowsLen >= 2) rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND($A' + dataStart + '="",ISNUMBER(SEARCH("Total",$B' + dataStart + ')))').setBackground(DASH_SITE_TOTAL_BG).setFontColor('#ffffff').setBold(true).setRanges([area]).build());
   // Value colour bands.
-  rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND(ISNUMBER(' + a + '),' + a + '<=$B$2)').setBackground(DASH_GREEN_BG).setRanges([area]).build());
+  // Same boundary rule as the web dashboard: green is strictly below B2, red is B4 and above, so a
+  // site on exactly 15% Passmaster reads amber in both places.
+  var gLt = def.strictGreen ? '<' : '<=', yGt = def.strictGreen ? '>=' : '>';
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND(ISNUMBER(' + a + '),' + a + gLt + '$B$2)').setBackground(DASH_GREEN_BG).setRanges([area]).build());
   rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND(ISNUMBER(' + a + '),' + a + '>=$B$4)').setBackground(DASH_RED_BG).setRanges([area]).build());
-  rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND(ISNUMBER(' + a + '),' + a + '>$B$2,' + a + '<$B$4)').setBackground(DASH_YELLOW_BG).setRanges([area]).build());
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied('=AND(ISNUMBER(' + a + '),' + a + yGt + '$B$2,' + a + '<$B$4)').setBackground(DASH_YELLOW_BG).setRanges([area]).build());
   dash.setConditionalFormatRules(rules);
 }
 
