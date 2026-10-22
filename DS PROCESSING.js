@@ -210,7 +210,12 @@ function onOpen() {
 
 /* ============================== SCHEDULED CATCH-UP ============================== */
 
-function startCatchUp() { log_('INFO', 'Catch-up started.'); toast_('Catch-up started.'); scheduledRefresh(); }
+function startCatchUp() {
+  PropertiesService.getScriptProperties().deleteProperty('CHAIN_FAILS');
+  scheduleContinuation_(5000);
+  log_('INFO', 'Catch-up queued.');
+  toast_('Catch-up queued - it starts within a minute and runs in the background. Progress is in the Logs tab.');
+}
 function stopCatchUp() { clearChainTriggers_(); log_('INFO', 'Catch-up stopped.'); toast_('Catch-up stopped.'); }
 // A run that dies mid-way (typically "Service Spreadsheets timed out" on the busy main workbook)
 // used to kill the whole chain: nothing scheduled the next run, so a Rebuild All could stop after
@@ -222,6 +227,15 @@ var SAFETY_DELAY_MS = MAX_RUNTIME_MS + 150 * 1000;
 var MAX_CONSECUTIVE_FAILURES = 6;
 
 function scheduledRefresh() {
+  // The whole run - rebuild resets included - holds the script lock. Without it a second trigger or a
+  // second Rebuild click could clear the summaries while another run was filling them. If another run
+  // holds the lock, touch nothing: that run schedules whatever comes next.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) { Logger.log('scheduledRefresh: another run is active - leaving it to continue.'); return; }
+  try { scheduledRefreshLocked_(); } finally { lock.releaseLock(); }
+}
+
+function scheduledRefreshLocked_() {
   var props = PropertiesService.getScriptProperties();
   clearChainTriggers_();
   scheduleContinuation_(SAFETY_DELAY_MS);
@@ -229,8 +243,9 @@ function scheduledRefresh() {
   var failed = false, pending = true;
   try {
     if (props.getProperty('REBUILD_PENDING') === '1') { rebuildResets_(); props.deleteProperty('REBUILD_PENDING'); }
-    refreshNewFiles();
-    pending = props.getProperty('KDS_DIRTY') === '1' || props.getProperty('HOURLY_DIRTY') === '1' || hasPendingFiles_();
+    _refreshNewFilesCore(); // already under the lock taken above
+    pending = props.getProperty('REBUILD_PENDING') === '1' || props.getProperty('KDS_DIRTY') === '1' ||
+              props.getProperty('HOURLY_DIRTY') === '1' || hasPendingFiles_();
   } catch (e) {
     failed = true;
     log_('WARN', 'Run interrupted (' + e.message + ') - it will resume automatically.');
@@ -318,9 +333,14 @@ function ensureDayIndexFile_() {
 function removeLegacyDayIndexTab_() {
   if (!PropertiesService.getScriptProperties().getProperty('DAYINDEX_SS_ID')) return;
   try {
-    var main = getSpreadsheet_(), sh = main.getSheetByName(SHEETS.DAY_INDEX);
-    if (sh && main.getSheets().length > 1) pmRetry_('removing old DayIndex tab', function () { main.deleteSheet(sh); });
-  } catch (e) { log_('WARN', 'Old DayIndex tab left in the workbook for now: ' + e.message); }
+    var sh = getSpreadsheet_().getSheetByName(SHEETS.DAY_INDEX);
+    if (!sh || sh.getMaxRows() <= 2) return;
+    pmRetry_('emptying old DayIndex tab', function () {
+      sh.clear();
+      if (sh.getMaxRows() > 2) sh.deleteRows(3, sh.getMaxRows() - 2);
+      sh.getRange(1, 1).setValue('DayIndex now lives in its own file (KDS DayIndex). This tab is no longer used.');
+    });
+  } catch (e) { log_('WARN', 'Old DayIndex tab left as it is for now: ' + e.message); }
 }
 function getOutputSheet_(name) {
   var ss = getOutputSpreadsheet_(name);
@@ -329,13 +349,20 @@ function getOutputSheet_(name) {
   if (sh.getLastRow() < 1) setHeader_(sh, HEADERS[name]);
   return sh;
 }
+// Clears a tab IN PLACE. It used to delete the tab and insert a fresh one, but adding or removing a
+// tab makes Sheets recalculate the whole workbook - in the main workbook that means three pivot
+// tables over tens of thousands of rows, which ran past the service timeout every time. Clearing
+// cells is an ordinary write and stays fast. The grid is shrunk too, so a cleared sheet doesn't
+// keep the weight of the rows it used to hold.
+var RESET_KEEP_ROWS = 1000;
 function resetOutputSheet_(name) {
   var ss = getOutputSpreadsheet_(name);
-  var sh = ss.getSheetByName(name);
-  if (sh) {
-    if (ss.getSheets().length > 1) { ss.deleteSheet(sh); sh = ss.insertSheet(name); }
-    else { try { sh.setConditionalFormatRules([]); } catch (e) {} sh.clear(); if (sh.getMaxRows() < 2) sh.insertRowsAfter(1, 999); }
-  } else { sh = ss.insertSheet(name); }
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+  try { sh.setConditionalFormatRules([]); } catch (e) {}
+  sh.clear();
+  var max = sh.getMaxRows();
+  if (max > RESET_KEEP_ROWS) sh.deleteRows(RESET_KEEP_ROWS + 1, max - RESET_KEEP_ROWS);
+  else if (max < 2) sh.insertRowsAfter(1, RESET_KEEP_ROWS - 1);
   setHeader_(sh, HEADERS[name]);
   return sh;
 }
@@ -743,8 +770,9 @@ function rebuildAll() {
   var props = PropertiesService.getScriptProperties();
   props.setProperty('REBUILD_PENDING', '1');
   props.deleteProperty('CHAIN_FAILS');
-  toast_('Rebuild started. It runs in the background and resumes itself if a step times out - progress is in the Logs tab.');
-  scheduledRefresh();
+  scheduleContinuation_(5000);
+  toast_('Rebuild queued - it starts within a minute and runs in the background (about 20-30 min). ' +
+         'Progress is in the Logs tab; it finishes with "Catch-up complete".');
 }
 
 // Every step retries on a transient timeout and THROWS if it still fails, so REBUILD_PENDING stays set
