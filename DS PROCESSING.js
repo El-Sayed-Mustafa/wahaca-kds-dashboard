@@ -148,6 +148,9 @@ var HEADERS = {
 var DEFAULT_SETTINGS = [
   ['Dinner_Cutoff_Time', '17:00'], ['Min_Start_Time', '11:30'],
   ['Range_Tolerance_Minutes', 8], ['Order_Group_Gap_Minutes', 1],
+  // Delivery tickets bumped faster than this are left out of Passmaster range grouping - e.g. the
+  // guacamole pot on Deliveroo is made and bumped straight away, which stretched every delivery group.
+  ['Delivery_Quick_Bump_Minutes', 2],
   ['Bar_Tolerance_Minutes', 5], ['Mains_Tolerance_Minutes', 15], ['Passmaster_Tolerance_Minutes', 2],
   ['Salad_Tolerance_Minutes', 15], ['Street_Tolerance_Minutes', 15],
   ['Green_Threshold', 0.10], ['Yellow_Threshold', 0.20], ['Red_Threshold', 0.30],
@@ -429,6 +432,15 @@ function setupKDSWorkbook() {
 
   var settingsSh = ss.getSheetByName(SHEETS.SETTINGS);
   if (settingsSh.getLastRow() < 2) settingsSh.getRange(2, 1, DEFAULT_SETTINGS.length, 2).setValues(DEFAULT_SETTINGS);
+  else {
+    // Settings added after the workbook was set up (Excluded_Tables, Delivery_Quick_Bump_Minutes)
+    // never appeared, because defaults were only written into an empty tab. Append just the missing
+    // ones so they are visible and editable; existing rows and values are left untouched.
+    var have = {};
+    settingsSh.getRange(2, 1, settingsSh.getLastRow() - 1, 1).getValues().forEach(function (r) { have[String(r[0]).trim()] = 1; });
+    var add = DEFAULT_SETTINGS.filter(function (kv) { return !have[kv[0]]; });
+    if (add.length) settingsSh.getRange(settingsSh.getLastRow() + 1, 1, add.length, 2).setValues(add);
+  }
   settingsSh.getRange(2, 2, settingsSh.getMaxRows() - 1, 1).setNumberFormat('@');
 
   var pwSh = ss.getSheetByName(SHEETS.PERIOD_WEEK);
@@ -458,7 +470,7 @@ function setupKDSWorkbook() {
 // It ran at the start of EVERY refresh - and every continuation of a rebuild - adding load to the
 // main workbook each time. Now it runs once per SETUP_VER (or if a core tab is missing); bump the
 // version when the setup itself changes, e.g. new period-week anchors.
-var SETUP_VER = '3';
+var SETUP_VER = '4'; // 4: append settings added since setup
 function ensureWorkbook_() {
   var props = PropertiesService.getScriptProperties(), ss = getSpreadsheet_();
   var missing = [SHEETS.SETTINGS, SHEETS.PERIOD_WEEK, SHEETS.STATION_MAP, SHEETS.PROCESSED_FILES, SHEETS.LOGS]
@@ -572,6 +584,7 @@ function getSettings_() {
     dinnerCutoffMinutes: parseTimeToMinutes_(map['Dinner_Cutoff_Time'], 17 * 60),
     minStartMinutes:     parseTimeToMinutes_(map['Min_Start_Time'], 11 * 60 + 30),
     rangeToleranceMinutes:  num('Range_Tolerance_Minutes', 8),
+    deliveryQuickBumpMinutes: num('Delivery_Quick_Bump_Minutes', 2),
     orderGroupGapMinutes:   num('Order_Group_Gap_Minutes', 1),
     toleranceByScreen: { Bar: num('Bar_Tolerance_Minutes', 5), Mains: num('Mains_Tolerance_Minutes', 15), Passmaster: num('Passmaster_Tolerance_Minutes', 2), Salad: num('Salad_Tolerance_Minutes', 15), Street: num('Street_Tolerance_Minutes', 15) },
     greenThreshold: num('Green_Threshold', 0.10), yellowThreshold: num('Yellow_Threshold', 0.20), redThreshold: num('Red_Threshold', 0.30),
@@ -897,7 +910,14 @@ function buildRangeOutputs_(rows, settings, fileId, fileName, forceDetail) {
   // Passmaster range measures how tightly the KITCHEN screens land an order. Bar is separate, and the
   // Passmaster screen is the expo - it bumps once the dishes are already at the pass, so counting it
   // stretched the range, and expo-only tickets formed empty 0-minute groups that padded the total.
-  for (var i = 0; i < rows.length; i++) if (!RANGE_EXCLUDED_SCREENS[rows[i].screen] && rows[i].check) rr.push(rows[i]);
+  var quick = settings.deliveryQuickBumpMinutes;
+  for (var i = 0; i < rows.length; i++) {
+    var rw0 = rows[i];
+    if (RANGE_EXCLUDED_SCREENS[rw0.screen] || !rw0.check) continue;
+    // Delivery only: dine-in is coursed and the gap rule already splits it correctly.
+    if (quick > 0 && rw0.duration < quick && pmIsDelivery_(rw0.station)) continue;
+    rr.push(rw0);
+  }
   rr.sort(function (a, b) { return cmp_(a.location, b.location) || cmp_(a.check, b.check) || cmp_(a.dateKey, b.dateKey) || (a.fired - b.fired) || (a.fulfilled - b.fulfilled); });
 
   var detail = [], lastKey = null, prevFired = null, og = 0;
@@ -926,7 +946,7 @@ function buildRangeOutputs_(rows, settings, fileId, fileName, forceDetail) {
     grp.rangeDuration = (grp.maxFulf.getTime() - grp.minFulf.getTime()) / 60000;
     grp.shift = minutesOfDay_(grp.minFired) >= settings.dinnerCutoffMinutes ? 'Dinner' : 'Lunch';
     grp.shiftOrder = grp.shift === 'Dinner' ? 2 : 1;
-    grp.over5 = grp.rangeDuration >= tol;
+    grp.over5 = grp.rangeDuration > tol + 1e-9; // exactly on the tolerance counts as in tolerance
     var list = Object.keys(grp.screens).sort(); grp.screenCount = list.length; grp.screensStr = list.join(', ');
   }
   var sgroups = {};
@@ -1477,6 +1497,7 @@ function pmRelaxDateField_() {
   var ctl = ss.getSheetByName(PM_CHECK_SHEET);
   if (!pmIsPanel_(ctl)) return;
   ctl.getRange(PM_CELL.date).setDataValidation(pmDateRule_());
+  ctl.getRange('C4:C6').setValues([['   Blank = every site'], ['   Blank = worst busy shift'], ['   Blank = either shift']]);
 }
 
 // headline is coloured against the Passmaster bands when a rate is supplied; errors stay neutral.
@@ -1604,7 +1625,8 @@ function pmWriteGroups_(ss, rows, target, settings, over, pct) {
     ['Date / shift', formatUk_(target.date) + (target.shift ? '   ' + target.shift : '   (both shifts)')],
     ['Result', rows.length + ' order groups  ·  ' + over + ' over  ·  ' + (pct * 100).toFixed(1) + '% Passmaster range'],
     ['By channel', 'Delivery ' + pctOf(sp.Delivery) + '      Dine-in ' + pctOf(sp['Dine-in'])],
-    ['Tolerance', settings.rangeToleranceMinutes + ' min — a group is OVER at or above this'],
+    ['Tolerance', settings.rangeToleranceMinutes + ' min — a group is OVER only above this (exactly ' + settings.rangeToleranceMinutes + ' min is in tolerance)'],
+    ['Left out', 'delivery tickets bumped in under ' + settings.deliveryQuickBumpMinutes + ' min (e.g. guacamole pots), and the Passmaster expo screen'],
     ['Grouping', 'a new order group starts after a ' + settings.orderGroupGapMinutes + ' min gap between fires on the same check'],
     ['Source', (target.sourceFiles || []).join('   |   ') + ((target.skippedFiles || []).length ? '    SKIPPED: ' + target.skippedFiles.join(', ') : '')]
   ]);
