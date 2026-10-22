@@ -740,7 +740,10 @@ function _refreshNewFilesCore() {
     var props = PropertiesService.getScriptProperties();
     if (done > 0) { props.setProperty('KDS_DIRTY', '1'); props.setProperty('HOURLY_DIRTY', '1'); }
     if (!stopped && props.getProperty('KDS_DIRTY') === '1') {
-      if ((Date.now() - EXEC_T0) < MAX_RUNTIME_MS * 0.6) { // enough budget left to refresh dashboards safely
+      // Refreshing the three pivot dashboards takes ~3 minutes on the busy workbook. Started at 0.6 of
+      // the budget (2.7 min) it ran into Google's hard 6-minute kill. Only start it early in a run -
+      // after a run that processed files, it simply goes first in the next one with a fresh budget.
+      if ((Date.now() - EXEC_T0) < MAX_RUNTIME_MS * 0.25) {
         try { refreshKdsDashboards(); props.deleteProperty('KDS_DIRTY'); log_('INFO', 'Dashboard data refreshed.'); }
         catch (e) { log_('WARN', 'Auto-refresh dashboards failed: ' + e.message); }
       } else { log_('INFO', 'Dashboard refresh deferred to next run (low time budget).'); } // KDS_DIRTY stays set -> scheduledRefresh queues a continuation
