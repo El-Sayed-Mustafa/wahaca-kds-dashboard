@@ -25,7 +25,7 @@ var CONFIG = {
   // amber = .green up to .amber, red = .amber and above. Change these to re-band the whole board.
   LB_BANDS: { red: { green: 0.10, amber: 0.15 }, pass: { green: 0.15, amber: 0.20 } },
   CACHE_TTL: 1800, // seconds cached period bundles live (30 min); Refresh forces a rebuild
-  CACHE_VER: 'v15', // bump this whenever the bundle shape changes — invalidates all cached bundles
+  CACHE_VER: 'v16', // bump this whenever the bundle shape changes — invalidates all cached bundles
   // Leaderboard weights live in LB_WEIGHTS in Index.html (50% food / 25% red / 25% Passmaster).
   // They were duplicated here and never read, so the copy has been removed rather than left to rot.
 };
