@@ -212,15 +212,43 @@ function onOpen() {
 
 function startCatchUp() { log_('INFO', 'Catch-up started.'); toast_('Catch-up started.'); scheduledRefresh(); }
 function stopCatchUp() { clearChainTriggers_(); log_('INFO', 'Catch-up stopped.'); toast_('Catch-up stopped.'); }
+// A run that dies mid-way (typically "Service Spreadsheets timed out" on the busy main workbook)
+// used to kill the whole chain: nothing scheduled the next run, so a Rebuild All could stop after
+// clearing the summaries and before refilling them. Now every run schedules a safety-net trigger
+// FIRST, timed to fire only after the run would normally have finished; a run that completes
+// replaces it with the real next step. Consecutive failures are capped so a permanent error can't
+// loop forever.
+var SAFETY_DELAY_MS = MAX_RUNTIME_MS + 150 * 1000;
+var MAX_CONSECUTIVE_FAILURES = 6;
+
 function scheduledRefresh() {
+  var props = PropertiesService.getScriptProperties();
   clearChainTriggers_();
-  refreshNewFiles();
-  var p = PropertiesService.getScriptProperties();
-  var dirty = p.getProperty('KDS_DIRTY') === '1' || p.getProperty('HOURLY_DIRTY') === '1';
-  if (hasPendingFiles_() || dirty) { scheduleContinuation_(); log_('INFO', 'More work queued (files, dashboard and/or heatmap refresh).'); }
+  scheduleContinuation_(SAFETY_DELAY_MS);
+
+  var failed = false, pending = true;
+  try {
+    if (props.getProperty('REBUILD_PENDING') === '1') { rebuildResets_(); props.deleteProperty('REBUILD_PENDING'); }
+    refreshNewFiles();
+    pending = props.getProperty('KDS_DIRTY') === '1' || props.getProperty('HOURLY_DIRTY') === '1' || hasPendingFiles_();
+  } catch (e) {
+    failed = true;
+    log_('WARN', 'Run interrupted (' + e.message + ') - it will resume automatically.');
+  }
+
+  var fails = failed ? (parseInt(props.getProperty('CHAIN_FAILS') || '0', 10) + 1) : 0;
+  props.setProperty('CHAIN_FAILS', String(fails));
+  if (fails >= MAX_CONSECUTIVE_FAILURES) {
+    clearChainTriggers_();
+    log_('ERROR', 'Stopped after ' + fails + ' failed runs in a row. Check the warnings above, then run Advanced > Start Catch-Up.');
+    toast_('Background processing stopped after repeated errors - see the Logs tab.');
+    return;
+  }
+  if (failed) { scheduleContinuation_(CHAIN_DELAY_MS * 2); return; } // give a busy workbook a moment
+  if (pending) { scheduleContinuation_(CHAIN_DELAY_MS); log_('INFO', 'More work queued (files, dashboard and/or heatmap refresh).'); }
   else { clearChainTriggers_(); log_('INFO', 'Catch-up complete.'); toast_('Catch-up complete.'); }
 }
-function scheduleContinuation_() { clearChainTriggers_(); ScriptApp.newTrigger(CHAIN_HANDLER).timeBased().after(CHAIN_DELAY_MS).create(); }
+function scheduleContinuation_(delayMs) { clearChainTriggers_(); ScriptApp.newTrigger(CHAIN_HANDLER).timeBased().after(delayMs || CHAIN_DELAY_MS).create(); }
 function clearChainTriggers_() {
   var ts = ScriptApp.getProjectTriggers();
   for (var i = 0; i < ts.length; i++) if (ts[i].getHandlerFunction() === CHAIN_HANDLER) ScriptApp.deleteTrigger(ts[i]);
@@ -237,7 +265,7 @@ function hasPendingFiles_() {
       var unchanged = prev && prev.status === 'Success' && Number(prev.fileSize) === Number(f.getSize()) && sameTime_(prev.lastUpdated, f.getLastUpdated());
       if (!unchanged) return true;
     }
-  } catch (e) { log_('ERROR', 'hasPendingFiles_ failed: ' + e.message); }
+  } catch (e) { log_('WARN', 'hasPendingFiles_ could not check (' + e.message + ') - assuming work remains.'); return true; }
   return false;
 }
 
@@ -261,8 +289,38 @@ function getSpreadsheet_() { var ss = SpreadsheetApp.getActiveSpreadsheet(); ret
 function openSpreadsheetById_(id) { if (!_SS_CACHE[id]) _SS_CACHE[id] = SpreadsheetApp.openById(id); return _SS_CACHE[id]; }
 function getOutputSpreadsheet_(name) {
   var id = OUTPUT_SPREADSHEETS[name];
+  if (name === SHEETS.DAY_INDEX) { var own = PropertiesService.getScriptProperties().getProperty('DAYINDEX_SS_ID'); if (own) id = own; }
   if (id && String(id).trim()) return openSpreadsheetById_(String(id).trim());
   return getSpreadsheet_();
+}
+
+// DayIndex carries a row per location/date/screen/shift - tens of thousands of rows - and is read in
+// full at the start of every run. Kept in the main workbook (with the pivots and their snapshots) it
+// was a big part of why that workbook kept timing out. It gets its own file, like the summaries.
+// Only a Rebuild moves it: the rebuild clears DayIndex anyway, so no claims are lost in the move.
+function ensureDayIndexFile_() {
+  var props = PropertiesService.getScriptProperties(), id = props.getProperty('DAYINDEX_SS_ID');
+  if (id) { try { SpreadsheetApp.openById(id); return id; } catch (e) { /* deleted or no access - make a new one */ } }
+  var ss = SpreadsheetApp.create('KDS DayIndex');
+  try { ss.getSheets()[0].setName(SHEETS.DAY_INDEX); } catch (e) {}
+  try {
+    var parents = DriveApp.getFileById(SPREADSHEET_ID).getParents();
+    if (parents.hasNext()) DriveApp.getFileById(ss.getId()).moveTo(parents.next()); // keep it beside the workbook
+  } catch (e) { log_('WARN', 'DayIndex file created but not moved into the KDS folder: ' + e.message); }
+  props.setProperty('DAYINDEX_SS_ID', ss.getId());
+  delete _SS_CACHE[ss.getId()];
+  log_('INFO', 'DayIndex moved to its own file: ' + ss.getUrl());
+  return ss.getId();
+}
+
+// Drop the old DayIndex tab from the main workbook once it lives elsewhere. Best effort: if deleting a
+// sheet that size times out, it is retried on the next rebuild and does no harm meanwhile.
+function removeLegacyDayIndexTab_() {
+  if (!PropertiesService.getScriptProperties().getProperty('DAYINDEX_SS_ID')) return;
+  try {
+    var main = getSpreadsheet_(), sh = main.getSheetByName(SHEETS.DAY_INDEX);
+    if (sh && main.getSheets().length > 1) pmRetry_('removing old DayIndex tab', function () { main.deleteSheet(sh); });
+  } catch (e) { log_('WARN', 'Old DayIndex tab left in the workbook for now: ' + e.message); }
 }
 function getOutputSheet_(name) {
   var ss = getOutputSpreadsheet_(name);
@@ -367,6 +425,20 @@ function setupKDSWorkbook() {
 
   log_('INFO', 'Setup complete.');
   toast_('Workbook setup complete.');
+}
+
+// The full setup rewrites headers, formats whole columns and re-reads the station map and calendar.
+// It ran at the start of EVERY refresh - and every continuation of a rebuild - adding load to the
+// main workbook each time. Now it runs once per SETUP_VER (or if a core tab is missing); bump the
+// version when the setup itself changes, e.g. new period-week anchors.
+var SETUP_VER = '3';
+function ensureWorkbook_() {
+  var props = PropertiesService.getScriptProperties(), ss = getSpreadsheet_();
+  var missing = [SHEETS.SETTINGS, SHEETS.PERIOD_WEEK, SHEETS.STATION_MAP, SHEETS.PROCESSED_FILES, SHEETS.LOGS]
+    .some(function (n) { return !ss.getSheetByName(n); });
+  if (!missing && props.getProperty('SETUP_VER') === SETUP_VER) return;
+  setupKDSWorkbook();
+  props.setProperty('SETUP_VER', SETUP_VER);
 }
 
 function removeUnusedTabs_() {
@@ -591,7 +663,7 @@ function refreshNewFiles() {
 function _refreshNewFilesCore() {
   var t0 = EXEC_T0; // measure the runtime budget from the true execution start (covers rebuildAll's setup/reset time)
   var ss = getSpreadsheet_();
-  setupKDSWorkbook();
+  ensureWorkbook_();
   log_('INFO', 'Refresh started.');
 
   var settings, periodMap, stationMap;
@@ -665,13 +737,24 @@ function rebuildAll() {
   try { var f = DriveApp.getFolderById(RAW_FOLDER_ID), it = f.getFiles(); while (it.hasNext()) { if (isCsvFile_(it.next())) { csvCount++; if (csvCount >= 1) break; } } }
   catch (e) { log_('ERROR', 'Rebuild aborted — cannot open raw folder: ' + e.message); toast_('Rebuild aborted: cannot open raw folder.'); return; }
   if (csvCount === 0) { log_('ERROR', 'Rebuild aborted — no CSV files in the raw folder, so the summaries were NOT cleared.'); toast_('Rebuild aborted: no CSV files found in the raw folder. Nothing was cleared.'); return; }
-  FILE_SCOPED_SHEETS.forEach(function (name) { try { resetOutputSheet_(name); } catch (e) { log_('ERROR', 'Reset failed for ' + name + ': ' + e.message); } });
-  try { resetOutputSheet_(SHEETS.PROCESSED_FILES); log_('INFO', 'ProcessedFiles reset for rebuild (' + Object.keys(getProcessedFilesMap_()).length + ' entries remaining).'); }
-  catch (e) { log_('ERROR', 'ProcessedFiles reset failed: ' + e.message); }
-  // scheduledRefresh -> refreshNewFiles runs setupKDSWorkbook itself, then processes up to the runtime
-  // budget; if files remain it schedules a continuation (~CHAIN_DELAY_MS later) and resumes until done.
-  toast_('Rebuild started. It will auto-continue in the background if it runs past the time limit.');
+  // The resets run inside scheduledRefresh, under its safety net, and only count as done once ALL of
+  // them succeed - so a timeout part-way through is retried rather than leaving summaries cleared
+  // and ProcessedFiles still saying everything was processed.
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty('REBUILD_PENDING', '1');
+  props.deleteProperty('CHAIN_FAILS');
+  toast_('Rebuild started. It runs in the background and resumes itself if a step times out - progress is in the Logs tab.');
   scheduledRefresh();
+}
+
+// Every step retries on a transient timeout and THROWS if it still fails, so REBUILD_PENDING stays set
+// and the next run starts the resets again. Re-clearing an already-empty sheet is cheap and harmless.
+function rebuildResets_() {
+  ensureDayIndexFile_();
+  FILE_SCOPED_SHEETS.forEach(function (name) { pmRetry_('resetting ' + name, function () { resetOutputSheet_(name); }); });
+  pmRetry_('resetting ProcessedFiles', function () { resetOutputSheet_(SHEETS.PROCESSED_FILES); });
+  removeLegacyDayIndexTab_();
+  log_('INFO', 'Rebuild: summaries, DayIndex and ProcessedFiles cleared - reprocessing every raw file.');
 }
 function clearLogs() { clearMainDataKeepHeader_(SHEETS.LOGS); toast_('Logs cleared.'); }
 
