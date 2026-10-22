@@ -262,10 +262,16 @@ window.onload=function(){
   fetchBundle('',false);
 };
 function parsePw(raw){var m=/P(\d+)W(\d+)/i.exec(String(raw));return m?{p:'P'+m[1],w:'W'+m[2],pn:+m[1],wn:+m[2]}:null;}
+// Every request is numbered and only the LATEST may draw. Server calls finish in any order, so
+// without this a slower reply for an earlier selection could land last and be shown under the
+// current dropdowns - wrong data with nothing on screen to say so.
+var BUNDLE_REQ=0;
 function fetchBundle(key,force){
+  var mine=++BUNDLE_REQ;
   document.getElementById('updated').innerHTML='<span class="spin"></span> loading…';
   if(force)document.getElementById('refreshBtn').classList.add('spinning');
   API.withSuccessHandler(function(b){
+    if(mine!==BUNDLE_REQ)return; // a newer selection has been requested since - drop this reply
     BUNDLE=b;
     if(!SCREEN_DEFAULTED){ // open with only Mains/Street/Salad ticked (if they exist)
       var want=['Mains','Street','Salad'].filter(function(s){return b.screens.indexOf(s)>=0;});
@@ -281,7 +287,7 @@ function fetchBundle(key,force){
     document.getElementById('refreshBtn').classList.remove('spinning');
     render();
     if(document.getElementById('view-leaderboard').classList.contains('show')||document.getElementById('view-wow').classList.contains('show')) loadLeaderboard(force);
-  }).withFailureHandler(function(err){document.getElementById('refreshBtn').classList.remove('spinning');toast('Load failed: '+(err&&err.message||err));}).getPeriodBundle(key,!!force);
+  }).withFailureHandler(function(err){if(mine!==BUNDLE_REQ)return;document.getElementById('refreshBtn').classList.remove('spinning');toast('Load failed: '+(err&&err.message||err));}).getPeriodBundle(key,!!force);
 }
 function buildPeriodWeek(b){
   // FYMAP: fy -> {ord:[periodLabels], map:{periodLabel:[rawWeeks]}}
@@ -590,7 +596,8 @@ function loadLeaderboard(force){
   if(MANUAL&&MANUAL_KEY===key&&!force){lbRenderAll();return;}
   document.getElementById('lbTable').innerHTML='<div class="note"><span class="spin"></span> loading…</div>';
   document.getElementById('wowTable').innerHTML='<div class="note"><span class="spin"></span> loading…</div>';
-  API.withSuccessHandler(function(list){MANUAL=list;MANUAL_KEY=key;lbRenderAll();}).withFailureHandler(function(e){toast('Load failed');}).getManualScores(key);
+  // Same rule as fetchBundle: scores for a selection the user has already moved away from are dropped.
+  API.withSuccessHandler(function(list){if(key!==buildKey())return;MANUAL=list;MANUAL_KEY=key;lbRenderAll();}).withFailureHandler(function(e){if(key!==buildKey())return;toast('Load failed');}).getManualScores(key);
 }
 // Leaderboard weighting. Deliveroo was dropped, so the three remaining columns carry it all.
 var LB_WEIGHTS={food:.50,red:.25,pass:.25};
