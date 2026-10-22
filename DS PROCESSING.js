@@ -37,6 +37,7 @@ var AUTO_BUILD_DASHBOARDS = true; // rebuild dashboards automatically once a ref
 var CHAIN_HANDLER   = 'scheduledRefresh';
 var MONITOR_HANDLER = 'monitorRefresh';
 
+var RANGE_EXCLUDED_SCREENS = { Bar: 1, Passmaster: 1 }; // never part of a Passmaster range group
 var MISSING_PW = { pw: 'Missing Period Mapping', order: 999999, label: 'Missing Period Mapping' };
 var _SS_CACHE = {};
 var EXEC_T0 = Date.now(); // true start of THIS execution (module loads once per run) - runtime budget is measured from here so setup time in rebuildAll counts too
@@ -779,7 +780,10 @@ function buildTimesSummary_(rows, fileId, fileName) {
 function buildRangeOutputs_(rows, settings, fileId, fileName, forceDetail) {
   var gap = settings.orderGroupGapMinutes, tol = settings.rangeToleranceMinutes;
   var rr = [];
-  for (var i = 0; i < rows.length; i++) if (rows[i].screen !== 'Bar' && rows[i].check) rr.push(rows[i]);
+  // Passmaster range measures how tightly the KITCHEN screens land an order. Bar is separate, and the
+  // Passmaster screen is the expo - it bumps once the dishes are already at the pass, so counting it
+  // stretched the range, and expo-only tickets formed empty 0-minute groups that padded the total.
+  for (var i = 0; i < rows.length; i++) if (!RANGE_EXCLUDED_SCREENS[rows[i].screen] && rows[i].check) rr.push(rows[i]);
   rr.sort(function (a, b) { return cmp_(a.location, b.location) || cmp_(a.check, b.check) || cmp_(a.dateKey, b.dateKey) || (a.fired - b.fired) || (a.fulfilled - b.fulfilled); });
 
   var detail = [], lastKey = null, prevFired = null, og = 0;
