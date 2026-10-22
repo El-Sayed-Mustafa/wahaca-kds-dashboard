@@ -210,7 +210,7 @@
         <div id="lbEditNote" class="note"></div>
         <div style="margin-top:14px"><button class="btn" id="lbSaveBtn" onclick="saveScores()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-9"/></svg> Save scores</button> <span id="lbSaved" class="note"></span></div>
         <div id="lbPending" class="note"></div>
-        <details class="lbhelp"><summary>How scoring works</summary><p class="note" style="margin-top:8px">Scores live in the <b>Leaderboard_Scores</b> tab (one row per site per week) — fill it in for history, or edit a single week here and Save. Food <b>≥7</b> is green, below is red. Red ticket and Passmaster come from KDS for the selection and are coloured against their <b>tolerances</b>, not against the other sites — Red ticket: under 10% green, 10–15% amber, 15%+ red. Passmaster: under 15% green, 15–20% amber, 20%+ red. Each column is ranked, ranks are weighted and summed — <b>lowest total wins</b>. Weights are <b>50% Food, 25% Red ticket, 25% Passmaster</b>, so poor food can't be offset by fast timings.</p></details>
+        <details class="lbhelp"><summary>How scoring works</summary><p class="note" style="margin-top:8px">Scores live in the <b>Leaderboard_Scores</b> tab (one row per site per week) — fill it in for history, or edit a single week here and Save. Food <b>≥7</b> is green, below is red. Red ticket and Passmaster come from KDS for the selection and are coloured against their <b>tolerances</b>, not against the other sites — Red ticket: under 10% green, 10–15% amber, 15%+ red. Passmaster: under 20% green, 20–25% amber, 25%+ red. Each column is ranked, ranks are weighted and summed — <b>lowest total wins</b>. Weights are <b>50% Food, 25% Red ticket, 25% Passmaster</b>, so poor food can't be offset by fast timings.</p></details>
       </div>
     </section>
 
@@ -688,8 +688,8 @@ function renderLeaderboard(d){
 }
 // Absolute colour bands (set server-side in CONFIG.LB_BANDS; the literals are only a fallback
 // for a stale cached bundle). Red ticket: <10% green, 10–15% amber, 15%+ red.
-// Passmaster: <15% green, 15–20% amber, 20%+ red.
-function lbBands(){return (BUNDLE&&BUNDLE.thresholds&&BUNDLE.thresholds.bands)||{red:{green:.10,amber:.15},pass:{green:.15,amber:.20}};}
+// Passmaster: <20% green, 20–25% amber, 25%+ red.
+function lbBands(){return (BUNDLE&&BUNDLE.thresholds&&BUNDLE.thresholds.bands)||{red:{green:.10,amber:.15},pass:{green:.20,amber:.25}};}
 function bandTint(v,b){if(v==null||!b)return 'na';return v<b.green?'good':(v<b.amber?'warn':'bad');}
 // ---- Week-on-week tab -----------------------------------------------------
 // Value + rank + movement for the same 4 metrics the leaderboard ranks on. Everything here is

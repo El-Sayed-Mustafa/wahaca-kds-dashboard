@@ -44,7 +44,7 @@ var DASH_DEFS = [
     headers: ['Location','Date','Shift','Period_Week','Period_Week_Order','Period_Week_Label','Day_Name','Day_Order','Shift_Order','Total_Orders','Over_5_Min_Orders','Red Range','Source File ID','Source File Name'],
     rows: ['Period_Week','Location'], cols: ['Day_Name','Shift'], value: 'Red Range', num: 'Over_5_Min_Orders', den: 'Total_Orders',
     slicers: ['Location','Period_Week'],
-    percent: true, strictGreen: true, greenDef: 0.15, yellowDef: 0.15, redDef: 0.20 // same as the web: <15% green, 15-20% amber, 20%+ red
+    percent: true, strictGreen: true, bandsVer: '3', greenDef: 0.20, yellowDef: 0.20, redDef: 0.25 // same as the web: <20% green, 20-25% amber, 25%+ red
   },
   {
     title: 'Red Ticket Dashboard', dataTab: '_RedData', caption: 'Red ticket % by day & shift (volume-weighted)',
@@ -52,7 +52,7 @@ var DASH_DEFS = [
     headers: ['Location','Screen','Date','Shift','Period_Week','Period_Week_Order','Period_Week_Label','Day_Name','Day_Order','Shift_Order','Total_Tickets','Over_Tolerance_Tickets','Red ticket %','Source File ID','Source File Name'],
     rows: ['Period_Week','Location','Screen'], cols: ['Day_Name','Shift'], value: 'Red ticket %', num: 'Over_Tolerance_Tickets', den: 'Total_Tickets',
     slicers: ['Screen','Location','Date','Period_Week'],
-    percent: true, strictGreen: true, greenDef: 0.10, yellowDef: 0.10, redDef: 0.15 // same as the web: <10% green, 10-15% amber, 15%+ red
+    percent: true, strictGreen: true, bandsVer: '2', greenDef: 0.10, yellowDef: 0.10, redDef: 0.15 // same as the web: <10% green, 10-15% amber, 15%+ red
   },
   {
     title: 'Times Dashboard', dataTab: '_TimesData', caption: 'Average duration (mins) by day & shift',
@@ -97,22 +97,25 @@ function applyDashboardColours() {
   dbToast_(msg); dbLog_(msg);
 }
 
-// Bump when the agreed default bands change. The existing dashboard tabs are moved onto the new
+// Bump a dashboard's bandsVer in DASH_DEFS when its default bands change. That tab is moved onto the new
 // defaults ONCE (next refresh, or Apply Dashboard Colours); after that, hand edits to B2/B4 stick.
-var DASH_BANDS_VER = '2';
+// Versioned PER DASHBOARD (def.bandsVer), so changing one dashboard's bands resets only that tab's
+// B2/B4 - hand edits on the other tabs are left alone.
 function alignDashboardBands_() {
   var props = PropertiesService.getScriptProperties();
-  if (props.getProperty('DASH_BANDS_VER') === DASH_BANDS_VER) return [];
+  var legacy = props.getProperty('DASH_BANDS_VER'); // the single version used before this was per tab
   var ss = dbMain_(), done = [];
   DASH_DEFS.forEach(function (def) {
-    if (!def.strictGreen) return;
+    if (!def.strictGreen || !def.bandsVer) return;
+    var key = 'DASH_BANDS_VER|' + def.title;
+    if ((props.getProperty(key) || legacy) === def.bandsVer) return;
     var sh = ss.getSheetByName(def.title);
     if (!sh) return;
     dbWriteColourControl_(sh, def);
     dbApplyBandsFormula_(sh, def);
+    props.setProperty(key, def.bandsVer);
     done.push(def.title);
   });
-  props.setProperty('DASH_BANDS_VER', DASH_BANDS_VER);
   if (done.length) dbLog_('Colour bands aligned with the web dashboard: ' + done.join(', '));
   return done;
 }

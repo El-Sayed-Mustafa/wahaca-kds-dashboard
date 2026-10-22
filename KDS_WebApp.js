@@ -23,9 +23,9 @@ var CONFIG = {
   STATUS_WATCH_MAX: 0.15, // Watch = 10–15%, Act = 15%+
   // Leaderboard colour bands — ABSOLUTE tolerances, not rank position. green = below .green,
   // amber = .green up to .amber, red = .amber and above. Change these to re-band the whole board.
-  LB_BANDS: { red: { green: 0.10, amber: 0.15 }, pass: { green: 0.15, amber: 0.20 } },
+  LB_BANDS: { red: { green: 0.10, amber: 0.15 }, pass: { green: 0.20, amber: 0.25 } }, // Passmaster raised 5 pts (Oct 2026)
   CACHE_TTL: 1800, // seconds cached period bundles live (30 min); Refresh forces a rebuild
-  CACHE_VER: 'v16', // bump this whenever the bundle shape changes — invalidates all cached bundles
+  CACHE_VER: 'v17', // bump this whenever the bundle shape changes — invalidates all cached bundles
   // Leaderboard weights live in LB_WEIGHTS in Index.html (50% food / 25% red / 25% Passmaster).
   // They were duplicated here and never read, so the copy has been removed rather than left to rot.
 };

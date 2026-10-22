@@ -290,7 +290,7 @@ average would let a quiet Tuesday lunch weigh as heavily as a full Saturday serv
 | Metric | Green | Amber | Red |
 |---|---|---|---|
 | Red ticket | under 10% | 10-15% | 15% and above |
-| Passmaster | under 15% | 15-20% | 20% and above |
+| Passmaster | under 20% | 20-25% | 25% and above |
 | Food score | 7 and above | — | below 7 |
 | Deliveroo | 4.65 and above | — | below 4.65 |
 
